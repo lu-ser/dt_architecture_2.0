@@ -1,0 +1,212 @@
+{
+    "// templates/digital_replicas/test_iot_sensor.json": {
+        "template_id": "test_iot_sensor",
+        "name": "Test IoT Sensor Replica",
+        "template_type": "digital_replica",
+        "version": "1.0.0",
+        "description": "Simple IoT sensor replica for testing",
+        "ontology_classes": [
+            "IoTDevice",
+            "SensorData"
+        ],
+        "configuration": {
+            "replica_type": "sensor_aggregator",
+            "aggregation_mode": "batch",
+            "aggregation_config": {
+                "batch_size": 5,
+                "method": "average",
+                "window_seconds": 60
+            },
+            "data_retention_policy": {
+                "retention_days": 7,
+                "compression_enabled": false
+            },
+            "quality_thresholds": {
+                "min_quality": 0.6,
+                "warning_threshold": 0.7
+            },
+            "device_constraints": {
+                "max_devices": 10,
+                "supported_protocols": [
+                    "http",
+                    "mqtt"
+                ]
+            }
+        },
+        "metadata": {
+            "allowed_override_keys": [
+                "aggregation_config.batch_size",
+                "aggregation_config.method",
+                "data_retention_policy.retention_days",
+                "quality_thresholds.min_quality"
+            ],
+            "required_keys": [
+                "replica_type",
+                "aggregation_mode"
+            ],
+            "tags": [
+                "test",
+                "iot",
+                "sensor"
+            ],
+            "use_cases": [
+                "Testing",
+                "Development"
+            ],
+            "author": "Test Suite"
+        }
+    },
+    "// templates/digital_replicas/test_device_proxy.yaml": "template_id: test_device_proxy\nname: Test Device Proxy\ntemplate_type: digital_replica\nversion: 1.0.0\ndescription: Simple device proxy for testing\n\nontology_classes:\n  - IndustrialDevice\n  - DeviceProxy\n\nconfiguration:\n  replica_type: device_proxy\n  aggregation_mode: real_time\n  \n  aggregation_config:\n    method: latest\n    quality_validation: true\n  \n  data_retention_policy:\n    retention_days: 3\n    backup_enabled: false\n  \n  quality_thresholds:\n    min_quality: 0.8\n    warning_threshold: 0.85\n  \n  device_constraints:\n    max_devices: 1\n    supported_protocols:\n      - http\n    real_time_required: true\n  \n  security_settings:\n    encryption_required: false\n    authentication_method: none\n\nmetadata:\n  allowed_override_keys:\n    - aggregation_config.quality_validation\n    - data_retention_policy.retention_days\n    - quality_thresholds.min_quality\n  \n  required_keys:\n    - replica_type\n    - aggregation_mode\n    - device_constraints.max_devices\n  \n  tags:\n    - test\n    - device-proxy\n    - real-time\n  \n  use_cases:\n    - Testing\n    - Development\n  \n  author: Test Suite",
+    "// templates/ontologies/test_ontology.json": {
+        "name": "Test_Ontology",
+        "version": "1.0.0",
+        "namespace": "http://test.digitaltwin.platform/ontology#",
+        "description": "Simple test ontology for Digital Twin testing",
+        "classes": [
+            {
+                "name": "TestDevice",
+                "uri": "http://test.digitaltwin.platform/ontology#TestDevice",
+                "description": "Base test device class",
+                "parent_classes": [],
+                "properties": [
+                    {
+                        "name": "deviceId",
+                        "property_type": "datatype",
+                        "range_type": "string",
+                        "description": "Unique device identifier",
+                        "constraints": {
+                            "required": true,
+                            "pattern": "^test-device-[0-9]+$"
+                        }
+                    },
+                    {
+                        "name": "deviceName",
+                        "property_type": "datatype",
+                        "range_type": "string",
+                        "description": "Human readable device name"
+                    },
+                    {
+                        "name": "isActive",
+                        "property_type": "datatype",
+                        "range_type": "boolean",
+                        "description": "Whether the device is currently active"
+                    }
+                ]
+            },
+            {
+                "name": "TestSensor",
+                "uri": "http://test.digitaltwin.platform/ontology#TestSensor",
+                "description": "Test sensor device",
+                "parent_classes": [
+                    "TestDevice"
+                ],
+                "properties": [
+                    {
+                        "name": "sensorType",
+                        "property_type": "datatype",
+                        "range_type": "string",
+                        "description": "Type of sensor",
+                        "constraints": {
+                            "required": true,
+                            "enum": [
+                                "temperature",
+                                "humidity",
+                                "pressure",
+                                "light"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "measurementRange",
+                        "property_type": "datatype",
+                        "range_type": "string",
+                        "description": "Measurement range of the sensor"
+                    },
+                    {
+                        "name": "accuracy",
+                        "property_type": "datatype",
+                        "range_type": "float",
+                        "description": "Sensor accuracy as a percentage",
+                        "constraints": {
+                            "min_value": 0.0,
+                            "max_value": 100.0
+                        }
+                    }
+                ]
+            },
+            {
+                "name": "TestData",
+                "uri": "http://test.digitaltwin.platform/ontology#TestData",
+                "description": "Test data from devices",
+                "parent_classes": [],
+                "properties": [
+                    {
+                        "name": "timestamp",
+                        "property_type": "datatype",
+                        "range_type": "datetime",
+                        "description": "When the data was recorded",
+                        "constraints": {
+                            "required": true
+                        }
+                    },
+                    {
+                        "name": "value",
+                        "property_type": "datatype",
+                        "range_type": "float",
+                        "description": "Measured value",
+                        "constraints": {
+                            "required": true
+                        }
+                    },
+                    {
+                        "name": "unit",
+                        "property_type": "datatype",
+                        "range_type": "string",
+                        "description": "Unit of measurement",
+                        "constraints": {
+                            "required": true
+                        }
+                    },
+                    {
+                        "name": "quality",
+                        "property_type": "datatype",
+                        "range_type": "string",
+                        "description": "Quality of the data",
+                        "constraints": {
+                            "enum": [
+                                "high",
+                                "medium",
+                                "low",
+                                "invalid"
+                            ]
+                        }
+                    }
+                ]
+            }
+        ],
+        "properties": [
+            {
+                "name": "hasData",
+                "property_type": "object",
+                "domain": "TestDevice",
+                "range_type": "TestData",
+                "description": "Device has data associated with it"
+            },
+            {
+                "name": "measures",
+                "property_type": "object",
+                "domain": "TestSensor",
+                "range_type": "string",
+                "description": "What the sensor measures"
+            }
+        ],
+        "metadata": {
+            "created_by": "Test Suite",
+            "creation_date": "2024-01-15",
+            "domain": "Testing",
+            "scope": "Digital Twin testing and validation",
+            "version_notes": "Simple ontology for testing virtualization layer components"
+        }
+    },
+    "// Create setup script - templates/setup_test_templates.py": "#!/usr/bin/env python3\n\"\"\"\nSetup script to create test template files.\n\nThis script creates the test template files in the correct directory structure\nfor testing the virtualization layer.\n\"\"\"\n\nimport json\nimport yaml\nfrom pathlib import Path\n\ndef create_test_templates():\n    \"\"\"Create test template files.\"\"\"\n    \n    # Create directories\n    templates_dir = Path(\"templates\")\n    dr_templates_dir = templates_dir / \"digital_replicas\"\n    ontologies_dir = templates_dir / \"ontologies\"\n    \n    dr_templates_dir.mkdir(parents=True, exist_ok=True)\n    ontologies_dir.mkdir(parents=True, exist_ok=True)\n    \n    print(f\"📁 Created directories:\")\n    print(f\"   • {dr_templates_dir}\")\n    print(f\"   • {ontologies_dir}\")\n    \n    # IoT Sensor Template (JSON)\n    iot_sensor_template = {\n        \"template_id\": \"test_iot_sensor\",\n        \"name\": \"Test IoT Sensor Replica\",\n        \"template_type\": \"digital_replica\",\n        \"version\": \"1.0.0\",\n        \"description\": \"Simple IoT sensor replica for testing\",\n        \"ontology_classes\": [\"TestDevice\", \"TestSensor\"],\n        \"configuration\": {\n            \"replica_type\": \"sensor_aggregator\",\n            \"aggregation_mode\": \"batch\",\n            \"aggregation_config\": {\n                \"batch_size\": 5,\n                \"method\": \"average\",\n                \"window_seconds\": 60\n            },\n            \"data_retention_policy\": {\n                \"retention_days\": 7,\n                \"compression_enabled\": False\n            },\n            \"quality_thresholds\": {\n                \"min_quality\": 0.6,\n                \"warning_threshold\": 0.7\n            },\n            \"device_constraints\": {\n                \"max_devices\": 10,\n                \"supported_protocols\": [\"http\", \"mqtt\"]\n            }\n        },\n        \"metadata\": {\n            \"allowed_override_keys\": [\n                \"aggregation_config.batch_size\",\n                \"aggregation_config.method\",\n                \"data_retention_policy.retention_days\",\n                \"quality_thresholds.min_quality\"\n            ],\n            \"required_keys\": [\n                \"replica_type\",\n                \"aggregation_mode\"\n            ],\n            \"tags\": [\"test\", \"iot\", \"sensor\"],\n            \"use_cases\": [\"Testing\", \"Development\"],\n            \"author\": \"Test Suite\"\n        }\n    }\n    \n    with open(dr_templates_dir / \"test_iot_sensor.json\", 'w') as f:\n        json.dump(iot_sensor_template, f, indent=2)\n    print(\"✅ Created test_iot_sensor.json\")\n    \n    # Device Proxy Template (YAML)\n    device_proxy_template = {\n        \"template_id\": \"test_device_proxy\",\n        \"name\": \"Test Device Proxy\",\n        \"template_type\": \"digital_replica\",\n        \"version\": \"1.0.0\",\n        \"description\": \"Simple device proxy for testing\",\n        \"ontology_classes\": [\"TestDevice\"],\n        \"configuration\": {\n            \"replica_type\": \"device_proxy\",\n            \"aggregation_mode\": \"real_time\",\n            \"aggregation_config\": {\n                \"method\": \"latest\",\n                \"quality_validation\": True\n            },\n            \"data_retention_policy\": {\n                \"retention_days\": 3,\n                \"backup_enabled\": False\n            },\n            \"quality_thresholds\": {\n                \"min_quality\": 0.8,\n                \"warning_threshold\": 0.85\n            },\n            \"device_constraints\": {\n                \"max_devices\": 1,\n                \"supported_protocols\": [\"http\"],\n                \"real_time_required\": True\n            },\n            \"security_settings\": {\n                \"encryption_required\": False,\n                \"authentication_method\": \"none\"\n            }\n        },\n        \"metadata\": {\n            \"allowed_override_keys\": [\n                \"aggregation_config.quality_validation\",\n                \"data_retention_policy.retention_days\",\n                \"quality_thresholds.min_quality\"\n            ],\n            \"required_keys\": [\n                \"replica_type\",\n                \"aggregation_mode\",\n                \"device_constraints.max_devices\"\n            ],\n            \"tags\": [\"test\", \"device-proxy\", \"real-time\"],\n            \"use_cases\": [\"Testing\", \"Development\"],\n            \"author\": \"Test Suite\"\n        }\n    }\n    \n    with open(dr_templates_dir / \"test_device_proxy.yaml\", 'w') as f:\n        yaml.dump(device_proxy_template, f, indent=2)\n    print(\"✅ Created test_device_proxy.yaml\")\n    \n    # Test Ontology\n    test_ontology = {\n        \"name\": \"Test_Ontology\",\n        \"version\": \"1.0.0\",\n        \"namespace\": \"http://test.digitaltwin.platform/ontology#\",\n        \"description\": \"Simple test ontology for Digital Twin testing\",\n        \"classes\": [\n            {\n                \"name\": \"TestDevice\",\n                \"uri\": \"http://test.digitaltwin.platform/ontology#TestDevice\",\n                \"description\": \"Base test device class\",\n                \"parent_classes\": [],\n                \"properties\": [\n                    {\n                        \"name\": \"deviceId\",\n                        \"property_type\": \"datatype\",\n                        \"range_type\": \"string\",\n                        \"description\": \"Unique device identifier\",\n                        \"constraints\": {\n                            \"required\": True,\n                            \"pattern\": \"^test-device-[0-9]+$\"\n                        }\n                    },\n                    {\n                        \"name\": \"deviceName\",\n                        \"property_type\": \"datatype\",\n                        \"range_type\": \"string\",\n                        \"description\": \"Human readable device name\"\n                    },\n                    {\n                        \"name\": \"isActive\",\n                        \"property_type\": \"datatype\",\n                        \"range_type\": \"boolean\",\n                        \"description\": \"Whether the device is currently active\"\n                    }\n                ]\n            },\n            {\n                \"name\": \"TestSensor\",\n                \"uri\": \"http://test.digitaltwin.platform/ontology#TestSensor\",\n                \"description\": \"Test sensor device\",\n                \"parent_classes\": [\"TestDevice\"],\n                \"properties\": [\n                    {\n                        \"name\": \"sensorType\",\n                        \"property_type\": \"datatype\",\n                        \"range_type\": \"string\",\n                        \"description\": \"Type of sensor\",\n                        \"constraints\": {\n                            \"required\": True,\n                            \"enum\": [\"temperature\", \"humidity\", \"pressure\", \"light\"]\n                        }\n                    },\n                    {\n                        \"name\": \"accuracy\",\n                        \"property_type\": \"datatype\",\n                        \"range_type\": \"float\",\n                        \"description\": \"Sensor accuracy as a percentage\",\n                        \"constraints\": {\n                            \"min_value\": 0.0,\n                            \"max_value\": 100.0\n                        }\n                    }\n                ]\n            }\n        ],\n        \"properties\": [\n            {\n                \"name\": \"hasData\",\n                \"property_type\": \"object\",\n                \"domain\": \"TestDevice\",\n                \"range_type\": \"TestData\",\n                \"description\": \"Device has data associated with it\"\n            }\n        ],\n        \"metadata\": {\n            \"created_by\": \"Test Suite\",\n            \"creation_date\": \"2024-01-15\",\n            \"domain\": \"Testing\",\n            \"scope\": \"Digital Twin testing and validation\"\n        }\n    }\n    \n    with open(ontologies_dir / \"test_ontology.json\", 'w') as f:\n        json.dump(test_ontology, f, indent=2)\n    print(\"✅ Created test_ontology.json\")\n    \n    print(\"\\n🎉 All test template files created successfully!\")\n    print(\"\\n📁 Directory structure:\")\n    print(f\"   templates/\")\n    print(f\"   ├── digital_replicas/\")\n    print(f\"   │   ├── test_iot_sensor.json\")\n    print(f\"   │   └── test_device_proxy.yaml\")\n    print(f\"   └── ontologies/\")\n    print(f\"       └── test_ontology.json\")\n\nif __name__ == \"__main__\":\n    create_test_templates()"
+}

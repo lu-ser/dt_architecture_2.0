@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional, TypeVar
 from uuid import UUID
 from datetime import datetime, timezone
 
-from core.interfaces.base import IStorageAdapter, IEntity
-from utils.exceptions import StorageError, DataPersistenceError
+from src.core.interfaces.base import IStorageAdapter, IEntity
+from src.utils.exceptions import StorageError, DataPersistenceError
 
 
 T = TypeVar('T', bound=IEntity)
@@ -194,7 +194,7 @@ class MockEntity(IEntity):
         entity_type: str = "mock",
         metadata: Optional[Dict[str, Any]] = None
     ):
-        from core.interfaces.base import BaseMetadata, EntityStatus
+        from src.core.interfaces.base import BaseMetadata, EntityStatus
         
         self._id = entity_id
         self._name = name
@@ -244,26 +244,26 @@ class MockEntity(IEntity):
     
     async def initialize(self) -> None:
         """Initialize the entity and prepare it for operation."""
-        from core.interfaces.base import EntityStatus
+        from src.core.interfaces.base import EntityStatus
         self._status = EntityStatus.INITIALIZING
         await asyncio.sleep(0.001)  # Simulate async initialization
         self._status = EntityStatus.ACTIVE
     
     async def start(self) -> None:
         """Start the entity operations."""
-        from core.interfaces.base import EntityStatus
+        from src.core.interfaces.base import EntityStatus
         self._status = EntityStatus.ACTIVE
         await asyncio.sleep(0.001)  # Simulate async start
     
     async def stop(self) -> None:
         """Stop the entity operations gracefully."""
-        from core.interfaces.base import EntityStatus
+        from src.core.interfaces.base import EntityStatus
         self._status = EntityStatus.INACTIVE
         await asyncio.sleep(0.001)  # Simulate async stop
     
     async def terminate(self) -> None:
         """Terminate the entity and cleanup resources."""
-        from core.interfaces.base import EntityStatus
+        from src.core.interfaces.base import EntityStatus
         self._status = EntityStatus.TERMINATED
         await asyncio.sleep(0.001)  # Simulate async termination
     
