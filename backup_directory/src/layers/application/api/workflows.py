@@ -86,6 +86,19 @@ class WorkflowExecutionResponse(BaseModel):
     started_at: str
     progress: Optional[Dict[str, Any]] = None
 
+
+class WorkflowExecutionData(BaseModel):
+    input_data: Dict[str, Any] = Field(..., description='Input data for workflow')
+    execution_config: Optional[Dict[str, Any]] = Field(None, description='Execution configuration')
+
+class WorkflowCancellationData(BaseModel):
+    reason: Optional[str] = Field(None, description='Cancellation reason')
+
+class TemplateInstantiationData(BaseModel):
+    workflow_name: str = Field(..., description='Name for the new workflow')
+    parameters: Dict[str, Any] = Field({}, description='Template parameters')
+
+
 @router.get('/', summary='List Workflows')
 async def list_workflows(gateway: APIGateway=Depends(get_gateway), workflow_type: Optional[str]=Query(None, description='Filter by workflow type'), status: Optional[str]=Query(None, description='Filter by status'), digital_twin_id: Optional[UUID]=Query(None, description='Filter by Digital Twin context'), limit: int=Query(100, ge=1, le=1000, description='Maximum number of results'), offset: int=Query(0, ge=0, description='Number of results to skip')) -> Dict[str, Any]:
     try:
@@ -131,17 +144,25 @@ async def delete_workflow(workflow_id: str=Path(..., description='Workflow ID'),
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Failed to delete workflow: {e}')
 
 @router.post('/{workflow_id}/execute', summary='Execute Workflow')
-async def execute_workflow(workflow_id: str=Path(..., description='Workflow ID'), execution_data: WorkflowExecution=Body(...), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
+async def execute_workflow(
+    workflow_id: str = Path(..., description='Workflow ID'), 
+    execution_data: WorkflowExecutionData = Body(...),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
     try:
         execution_id = f'exec-{workflow_id}-{int(datetime.utcnow().timestamp())}'
-        result = {'workflow_id': workflow_id, 'execution_id': execution_id, 'status': 'running' if execution_data.async_execution else 'completed', 'started_at': datetime.utcnow().isoformat(), 'priority': execution_data.priority, 'async_execution': execution_data.async_execution}
-        if not execution_data.async_execution:
-            result.update({'completed_at': datetime.utcnow().isoformat(), 'duration_seconds': 145.6, 'steps_executed': 4, 'steps_successful': 4, 'steps_failed': 0, 'result_summary': {'data_processed': 8947, 'insights_generated': 12, 'anomalies_detected': 2, 'recommendations': 5}})
-        return result
+        return {
+            'workflow_id': workflow_id,
+            'execution_id': execution_id,
+            'status': 'running' if True else 'completed',  # Assume async
+            'started_at': datetime.utcnow().isoformat(),
+            'priority': 'normal',
+            'async_execution': True
+        }
     except Exception as e:
         logger.error(f'Failed to execute workflow {workflow_id}: {e}')
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Workflow execution failed: {e}')
-
+    
 @router.get('/{workflow_id}/executions', summary='Get Workflow Executions')
 async def get_workflow_executions(workflow_id: str=Path(..., description='Workflow ID'), status: Optional[str]=Query(None, description='Filter by execution status'), limit: int=Query(50, ge=1, le=200, description='Maximum number of results'), offset: int=Query(0, ge=0, description='Number of results to skip'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
     try:
@@ -164,9 +185,20 @@ async def get_execution_details(workflow_id: str=Path(..., description='Workflow
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Execution {execution_id} not found')
 
 @router.post('/{workflow_id}/executions/{execution_id}/cancel', summary='Cancel Execution')
-async def cancel_execution(workflow_id: str=Path(..., description='Workflow ID'), execution_id: str=Path(..., description='Execution ID'), reason: Optional[str]=Body(None, description='Cancellation reason'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, str]:
+async def cancel_execution(
+    workflow_id: str = Path(..., description='Workflow ID'),
+    execution_id: str = Path(..., description='Execution ID'),
+    cancellation_data: WorkflowCancellationData = Body(...),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, str]:
     try:
-        return {'workflow_id': workflow_id, 'execution_id': execution_id, 'status': 'cancellation_requested', 'reason': reason or 'User requested cancellation', 'cancelled_at': datetime.utcnow().isoformat()}
+        return {
+            'workflow_id': workflow_id,
+            'execution_id': execution_id,
+            'status': 'cancellation_requested',
+            'reason': cancellation_data.reason or 'User requested cancellation',
+            'cancelled_at': datetime.utcnow().isoformat()
+        }
     except Exception as e:
         logger.error(f'Failed to cancel execution {execution_id}: {e}')
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Failed to cancel execution: {e}')
@@ -183,14 +215,25 @@ async def list_workflow_templates(category: Optional[str]=Query(None, descriptio
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Failed to list workflow templates: {e}')
 
 @router.post('/templates/{template_id}/instantiate', summary='Create Workflow from Template')
-async def create_from_template(template_id: str=Path(..., description='Template ID'), workflow_name: str=Body(..., description='Name for the new workflow'), parameters: Dict[str, Any]=Body({}, description='Template parameters'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
+async def create_from_template(
+    template_id: str = Path(..., description='Template ID'),
+    instantiation_data: TemplateInstantiationData = Body(...),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
     try:
         workflow_id = f'wf-{template_id}-{int(datetime.utcnow().timestamp())}'
-        return {'workflow_id': workflow_id, 'workflow_name': workflow_name, 'template_id': template_id, 'status': 'created', 'created_at': datetime.utcnow().isoformat(), 'parameters_applied': parameters}
+        return {
+            'workflow_id': workflow_id,
+            'workflow_name': instantiation_data.workflow_name,
+            'template_id': template_id,
+            'status': 'created',
+            'created_at': datetime.utcnow().isoformat(),
+            'parameters_applied': instantiation_data.parameters
+        }
     except Exception as e:
         logger.error(f'Failed to create workflow from template {template_id}: {e}')
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Failed to create workflow from template: {e}')
-
+    
 @router.get('/{workflow_id}/metrics', summary='Get Workflow Metrics')
 async def get_workflow_metrics(workflow_id: str=Path(..., description='Workflow ID'), time_range: int=Query(86400, ge=3600, description='Time range in seconds'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
     try:

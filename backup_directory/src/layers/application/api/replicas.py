@@ -181,17 +181,32 @@ async def get_data_quality_report(replica_id: UUID=Path(..., description='Digita
         logger.error(f'Failed to get data quality report for replica {replica_id}: {e}')
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Failed to get data quality report: {e}')
 
+
+class AggregationTriggerData(BaseModel):
+    force: bool = Field(False, description='Force aggregation even if conditions not met')
+
 @router.post('/{replica_id}/aggregation/trigger', summary='Force Data Aggregation')
-async def trigger_aggregation(replica_id: UUID=Path(..., description='Digital Replica ID'), force: bool=Body(False, description='Force aggregation even if conditions not met'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
+async def trigger_aggregation(
+    replica_id: UUID = Path(..., description='Digital Replica ID'), 
+    trigger_data: AggregationTriggerData = Body(...),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
     try:
         triggered_at = datetime.utcnow()
-        return {'replica_id': str(replica_id), 'aggregation_triggered': True, 'forced': force, 'triggered_at': triggered_at.isoformat(), 'estimated_completion': triggered_at.timestamp() + 30, 'aggregation_id': f'agg-{replica_id}-{int(triggered_at.timestamp())}'}
+        return {
+            'replica_id': str(replica_id),
+            'aggregation_triggered': True,
+            'forced': trigger_data.force,
+            'triggered_at': triggered_at.isoformat(),
+            'estimated_completion': triggered_at.timestamp() + 30,
+            'aggregation_id': f'agg-{replica_id}-{int(triggered_at.timestamp())}'
+        }
     except EntityNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Digital Replica {replica_id} not found')
     except Exception as e:
         logger.error(f'Failed to trigger aggregation for replica {replica_id}: {e}')
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Aggregation trigger failed: {e}')
-
+    
 @router.post('/{replica_id}/deploy', summary='Deploy as Container')
 async def deploy_as_container(replica_id: UUID=Path(..., description='Digital Replica ID'), deployment: ContainerDeployment=Body(...), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
     try:

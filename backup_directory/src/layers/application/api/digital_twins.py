@@ -11,6 +11,14 @@ from src.utils.exceptions import EntityNotFoundError
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+class PredictExecutionData(BaseModel):
+    prediction_horizon: int = Field(300, ge=1, description='Prediction horizon in seconds')
+    scenario: Optional[Dict[str, Any]] = Field(None, description='Scenario parameters')
+
+class SimulateExecutionData(BaseModel):
+    simulation_config: Dict[str, Any] = Field(..., description='Simulation configuration')
+    duration: int = Field(60, ge=1, description='Simulation duration in seconds')
+
 class DigitalTwinCreate(BaseModel):
     twin_type: str = Field(..., description='Type of Digital Twin')
     name: str = Field(..., min_length=1, max_length=255, description='Human-readable name')
@@ -142,10 +150,21 @@ async def execute_capability(twin_id: UUID=Path(..., description='Digital Twin I
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Capability execution failed: {e}')
 
 @router.post('/{twin_id}/predict', summary='Execute Prediction Capability')
-async def predict(twin_id: UUID=Path(..., description='Digital Twin ID'), prediction_horizon: int=Body(300, ge=1, description='Prediction horizon in seconds'), scenario: Optional[Dict[str, Any]]=Body(None, description='Scenario parameters'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
+async def predict(
+    twin_id: UUID = Path(..., description='Digital Twin ID'),
+    prediction_data: PredictExecutionData = Body(...),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
     try:
-        execution_data = {'horizon': prediction_horizon, 'scenario': scenario}
-        result = await gateway.execute_twin_capability(twin_id=twin_id, capability='prediction', input_data=execution_data)
+        execution_data = {
+            'horizon': prediction_data.prediction_horizon,
+            'scenario': prediction_data.scenario
+        }
+        result = await gateway.execute_twin_capability(
+            twin_id=twin_id,
+            capability='prediction',
+            input_data=execution_data
+        )
         return result
     except EntityNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Digital Twin {twin_id} not found')
@@ -154,10 +173,21 @@ async def predict(twin_id: UUID=Path(..., description='Digital Twin ID'), predic
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Prediction failed: {e}')
 
 @router.post('/{twin_id}/simulate', summary='Execute Simulation Capability')
-async def simulate(twin_id: UUID=Path(..., description='Digital Twin ID'), simulation_config: Dict[str, Any]=Body(..., description='Simulation configuration'), duration: int=Body(60, ge=1, description='Simulation duration in seconds'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
+async def simulate(
+    twin_id: UUID = Path(..., description='Digital Twin ID'),
+    simulation_data: SimulateExecutionData = Body(...),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
     try:
-        execution_data = {'config': simulation_config, 'duration': duration}
-        result = await gateway.execute_twin_capability(twin_id=twin_id, capability='simulation', input_data=execution_data)
+        execution_data = {
+            'config': simulation_data.simulation_config,
+            'duration': simulation_data.duration
+        }
+        result = await gateway.execute_twin_capability(
+            twin_id=twin_id,
+            capability='simulation',
+            input_data=execution_data
+        )
         return result
     except EntityNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Digital Twin {twin_id} not found')
@@ -165,6 +195,7 @@ async def simulate(twin_id: UUID=Path(..., description='Digital Twin ID'), simul
         logger.error(f'Failed to execute simulation on twin {twin_id}: {e}')
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Simulation failed: {e}')
 
+        
 @router.get('/{twin_id}/ecosystem', summary='Get Digital Twin Ecosystem Status')
 async def get_ecosystem_status(twin_id: UUID=Path(..., description='Digital Twin ID'), gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
     try:

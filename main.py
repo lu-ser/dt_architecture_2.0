@@ -202,8 +202,10 @@ class DigitalTwinPlatform:
             
             # Get FastAPI app
             from src.layers.application.api import get_app
-            app = get_app()
-            
+            try:
+                app = get_app()
+            except:
+                app = get_app()
             # Configure uvicorn
             config = uvicorn.Config(
                 app=app,
