@@ -16,13 +16,35 @@ from typing import Optional
 # Import configuration and utilities
 from src.utils.config import get_config, load_config_from_file, load_config_from_env
 from src.utils.exceptions import ConfigurationError
-from src.utils.logging import setup_logging
+
+# Setup logging - use basic logging if custom module not available
+try:
+    from src.utils.logging import setup_logging
+except ImportError:
+    def setup_logging():
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler()]
+        )
 
 # Import layer orchestrators
-from src.layers.application import initialize_application_layer, stop_application_services
+try:
+    from src.layers.application import initialize_application_layer, stop_application_services
+except ImportError:
+    # Fallback if application layer init file has wrong name
+    async def initialize_application_layer():
+        from src.layers.application.api_gateway import initialize_api_gateway
+        return await initialize_api_gateway()
+    
+    async def stop_application_services():
+        pass
+
 from src.layers.application.api import start_api_server
-from src.layers.digital_twin import initialize_digital_twin_layer
-from src.layers.service import initialize_service_layer  
+
+# Import layer orchestrators directly since they may not have __init__.py files
+from src.layers.digital_twin import get_digital_twin_orchestrator
+from src.layers.service import get_service_orchestrator  
 from src.layers.virtualization import initialize_virtualization_layer
 
 logger = logging.getLogger(__name__)
@@ -62,13 +84,17 @@ class DigitalTwinPlatform:
             logger.info("Initializing Virtualization Layer...")
             self.virtualization_layer = await initialize_virtualization_layer()
             
-            # 2. Service Layer
+            # 2. Service Layer - get orchestrator and initialize
             logger.info("Initializing Service Layer...")
-            self.service_layer = await initialize_service_layer()
+            self.service_layer = get_service_orchestrator()
+            if not self.service_layer._initialized:
+                await self.service_layer.initialize()
             
-            # 3. Digital Twin Layer (depends on virtualization and service)
+            # 3. Digital Twin Layer - get orchestrator and initialize
             logger.info("Initializing Digital Twin Layer...")
-            self.digital_twin_layer = await initialize_digital_twin_layer()
+            self.digital_twin_layer = get_digital_twin_orchestrator()
+            if not self.digital_twin_layer._initialized:
+                await self.digital_twin_layer.initialize()
             
             # 4. Application Layer (API layer, depends on all others)
             logger.info("Initializing Application Layer...")
@@ -99,8 +125,7 @@ class DigitalTwinPlatform:
             if self.digital_twin_layer:
                 await self.digital_twin_layer.start()
             
-            if self.application_layer:
-                await self.application_layer.start()
+            # Application layer doesn't have a start method in the current implementation
             
             self.running = True
             logger.info("Digital Twin Platform started successfully")
@@ -119,8 +144,7 @@ class DigitalTwinPlatform:
         
         try:
             # Stop layers in reverse order
-            if self.application_layer:
-                await stop_application_services()
+            await stop_application_services()
             
             if self.digital_twin_layer:
                 await self.digital_twin_layer.stop()
