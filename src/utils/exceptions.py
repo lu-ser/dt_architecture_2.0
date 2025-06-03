@@ -244,3 +244,44 @@ class PluginLoadError(PluginError):
 class PluginConfigurationError(PluginError):
     """Raised when plugin configuration is invalid."""
     pass
+
+
+class AuthorizationError(AuthenticationError):
+    """Raised when authorization check fails."""
+    pass
+
+
+
+
+
+class RateLimitError(AuthenticationError):
+    """Raised when API rate limit is exceeded."""
+    
+    def __init__(self, message: str, retry_after: Optional[int] = None, details: Optional[Dict[str, Any]] = None):
+        super().__init__(message, details)
+        self.retry_after = retry_after  # Seconds until retry allowed
+
+
+# Validation Exceptions
+class ValidationError(DigitalTwinPlatformError):
+    """Base exception for validation-related errors."""
+    
+    def __init__(self, message: str, field: Optional[str] = None, value: Any = None, details: Optional[Dict[str, Any]] = None):
+        super().__init__(message, details)
+        self.field = field
+        self.value = value
+
+
+class SchemaValidationError(ValidationError):
+    """Raised when data doesn't match expected schema."""
+    pass
+
+
+class PermissionValidationError(ValidationError):
+    """Raised when permission format is invalid."""
+    pass
+
+
+class APIGatewayError(DigitalTwinPlatformError):
+    """Base exception for API Gateway-related errors."""
+    pass
