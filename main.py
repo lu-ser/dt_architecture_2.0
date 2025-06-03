@@ -18,7 +18,7 @@ import uvicorn
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Setup basic logging first
+# Setup basic logging first (NO EMOJI!)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,23 +27,11 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-class DigitalTwinPlatform:
-    """Main platform class that coordinates all layers and components."""
+class SimpleConfig:
+    """Simple configuration class without circular imports."""
     
-    def __init__(self, config_file: Optional[Path] = None):
-        self.config_file = config_file
-        self.config = self._load_default_config()
-        self.virtualization_orchestrator = None
-        self.service_orchestrator = None
-        self.digital_twin_orchestrator = None
-        self.application_layer = None
-        self.api_gateway = None
-        self.running = False
-        self._shutdown_event = asyncio.Event()
-        
-    def _load_default_config(self) -> dict:
-        """Load default configuration."""
-        return {
+    def __init__(self):
+        self.data = {
             'environment': os.getenv('DT_ENVIRONMENT', 'development'),
             'debug': os.getenv('DT_DEBUG', 'true').lower() == 'true',
             'version': '1.0.0',
@@ -78,11 +66,43 @@ class DigitalTwinPlatform:
                 'password': os.getenv('DT_REDIS_PASSWORD')
             }
         }
+    
+    def get(self, key, default=None):
+        """Get configuration value using dot notation."""
+        keys = key.split('.')
+        value = self.data
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else:
+                return default
+        return value
+    
+    def __getitem__(self, key):
+        return self.get(key)
+    
+    def __contains__(self, key):
+        return self.get(key) is not None
+
+
+class DigitalTwinPlatform:
+    """Main platform class that coordinates all layers and components."""
+    
+    def __init__(self, config_file: Optional[Path] = None):
+        self.config_file = config_file
+        self.config = SimpleConfig()
+        self.virtualization_orchestrator = None
+        self.service_orchestrator = None
+        self.digital_twin_orchestrator = None
+        self.application_layer = None
+        self.api_gateway = None
+        self.running = False
+        self._shutdown_event = asyncio.Event()
         
     async def initialize(self) -> None:
         """Initialize the platform and all its components."""
         try:
-            logger.info("🚀 Starting Digital Twin Platform initialization...")
+            logger.info("Starting Digital Twin Platform initialization...")
             
             # 1. Setup enhanced logging
             self._setup_logging()
@@ -96,10 +116,10 @@ class DigitalTwinPlatform:
             # 4. Initialize API Gateway
             await self._initialize_api_gateway()
             
-            logger.info("✅ Digital Twin Platform initialized successfully")
+            logger.info("Digital Twin Platform initialized successfully")
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Digital Twin Platform: {e}")
+            logger.error(f"Failed to initialize Digital Twin Platform: {e}")
             logger.exception("Full traceback:")
             raise RuntimeError(f"Platform initialization failed: {e}")
     
@@ -110,7 +130,7 @@ class DigitalTwinPlatform:
             return
             
         try:
-            logger.info("🌟 Starting Digital Twin Platform services...")
+            logger.info("Starting Digital Twin Platform services...")
             
             # Start all layer orchestrators
             await self._start_layer_orchestrators()
@@ -119,13 +139,13 @@ class DigitalTwinPlatform:
             await self._start_application_services()
             
             self.running = True
-            logger.info("✅ Digital Twin Platform is now running and ready to accept requests")
+            logger.info("Digital Twin Platform is now running and ready to accept requests")
             
             # Log platform overview
             await self._log_platform_status()
             
         except Exception as e:
-            logger.error(f"❌ Failed to start Digital Twin Platform: {e}")
+            logger.error(f"Failed to start Digital Twin Platform: {e}")
             await self.stop()
             raise
     
@@ -134,7 +154,7 @@ class DigitalTwinPlatform:
         if not self.running:
             return
             
-        logger.info("🛑 Stopping Digital Twin Platform...")
+        logger.info("Stopping Digital Twin Platform...")
         
         try:
             # Stop layers in reverse order
@@ -153,10 +173,10 @@ class DigitalTwinPlatform:
             self.running = False
             self._shutdown_event.set()
             
-            logger.info("✅ Digital Twin Platform stopped successfully")
+            logger.info("Digital Twin Platform stopped successfully")
             
         except Exception as e:
-            logger.error(f"❌ Error during platform shutdown: {e}")
+            logger.error(f"Error during platform shutdown: {e}")
     
     async def run_forever(self) -> None:
         """Run the platform until shutdown signal is received."""
@@ -171,14 +191,14 @@ class DigitalTwinPlatform:
             await self._shutdown_event.wait()
             
         except KeyboardInterrupt:
-            logger.info("🔸 Received keyboard interrupt")
+            logger.info("Received keyboard interrupt")
         finally:
             await self.stop()
     
     async def start_api_server(self, host: str = "0.0.0.0", port: int = 8000) -> None:
         """Start the FastAPI server."""
         try:
-            logger.info(f"🌐 Starting API server on {host}:{port}")
+            logger.info(f"Starting API server on {host}:{port}")
             
             # Get FastAPI app
             from src.layers.application.api import get_app
@@ -200,13 +220,13 @@ class DigitalTwinPlatform:
             await server.serve()
             
         except Exception as e:
-            logger.error(f"❌ Failed to start API server: {e}")
+            logger.error(f"Failed to start API server: {e}")
             raise
     
     def _setup_logging(self) -> None:
         """Setup enhanced logging with platform configuration."""
-        log_level = self.config['logging']['level']
-        log_file = self.config['logging']['file_path']
+        log_level = self.config.get('logging.level')
+        log_file = self.config.get('logging.file_path')
         
         # Create logs directory if it doesn't exist
         if log_file:
@@ -214,7 +234,7 @@ class DigitalTwinPlatform:
         
         # Setup file handler if specified
         if log_file:
-            file_handler = logging.FileHandler(log_file)
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
             file_handler.setLevel(getattr(logging, log_level))
             file_handler.setFormatter(
                 logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -224,43 +244,30 @@ class DigitalTwinPlatform:
         # Set logging level
         logging.getLogger().setLevel(getattr(logging, log_level))
         
-        logger.info(f"📝 Logging configured - Level: {log_level}, File: {log_file or 'Console only'}")
+        logger.info(f"Logging configured - Level: {log_level}, File: {log_file or 'Console only'}")
     
     def _patch_module_configs(self) -> None:
         """Patch module configurations to work with our config."""
-        # Create a simple config object that has the get method
-        class ConfigProxy:
-            def __init__(self, config_dict):
-                self._config = config_dict
-            
-            def get(self, key, default=None):
-                keys = key.split('.')
-                value = self._config
-                for k in keys:
-                    if isinstance(value, dict) and k in value:
-                        value = value[k]
-                    else:
-                        return default
-                return value
-            
-            def __getitem__(self, key):
-                return self.get(key)
-            
-            def __contains__(self, key):
-                return self.get(key) is not None
+        # Patch get_config functions directly without imports
+        import sys
         
-        # Monkey patch the config in modules that need it
-        config_proxy = ConfigProxy(self.config)
+        # Create a mock config module
+        class MockConfigModule:
+            def get_config(self):
+                return self.config
+            
+            def __init__(self, config):
+                self.config = config
         
-        # Patch get_config functions
-        import src.utils.config as config_module
-        config_module.get_config = lambda: config_proxy
+        # If the config module exists, patch it
+        if 'src.utils.config' in sys.modules:
+            sys.modules['src.utils.config'].get_config = lambda: self.config
         
-        logger.info("📋 Configuration patched for all modules")
+        logger.info("Configuration patched for all modules")
     
     async def _initialize_layers(self) -> None:
         """Initialize all platform layers in the correct order."""
-        logger.info("🏗️  Initializing platform layers...")
+        logger.info("Initializing platform layers...")
         
         try:
             # 1. Initialize Virtualization Layer (handles Digital Replicas)
@@ -283,7 +290,7 @@ class DigitalTwinPlatform:
             from src.layers.application import initialize_application_layer
             self.application_layer = await initialize_application_layer()
             
-            logger.info("✅ All platform layers initialized")
+            logger.info("All platform layers initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize layers: {e}")
@@ -291,31 +298,31 @@ class DigitalTwinPlatform:
     
     async def _initialize_api_gateway(self) -> None:
         """Initialize the API Gateway."""
-        logger.info("🌐 Initializing API Gateway...")
+        logger.info("Initializing API Gateway...")
         try:
             from src.layers.application.api_gateway import initialize_api_gateway
             self.api_gateway = await initialize_api_gateway()
-            logger.info("✅ API Gateway initialized")
+            logger.info("API Gateway initialized")
         except Exception as e:
             logger.error(f"Failed to initialize API Gateway: {e}")
             raise
     
     async def _start_layer_orchestrators(self) -> None:
         """Start all layer orchestrators."""
-        logger.info("▶️  Starting layer orchestrators...")
+        logger.info("Starting layer orchestrators...")
         
         try:
             # Start in dependency order
             await self.virtualization_orchestrator.start()
-            logger.info("✅ Virtualization Layer started")
+            logger.info("Virtualization Layer started")
             
             await self.service_orchestrator.start()
-            logger.info("✅ Service Layer started")
+            logger.info("Service Layer started")
             
             await self.digital_twin_orchestrator.start()
-            logger.info("✅ Digital Twin Layer started")
+            logger.info("Digital Twin Layer started")
             
-            logger.info("✅ All layer orchestrators started")
+            logger.info("All layer orchestrators started")
             
         except Exception as e:
             logger.error(f"Failed to start layer orchestrators: {e}")
@@ -326,7 +333,7 @@ class DigitalTwinPlatform:
         try:
             from src.layers.application import start_application_services
             await start_application_services()
-            logger.info("✅ Application services started")
+            logger.info("Application services started")
         except Exception as e:
             logger.error(f"Failed to start application services: {e}")
             raise
@@ -337,20 +344,24 @@ class DigitalTwinPlatform:
             if self.digital_twin_orchestrator:
                 overview = await self.digital_twin_orchestrator.get_platform_overview()
                 
-                logger.info("📊 Platform Status Overview:")
-                logger.info(f"   • Digital Twin Layer: {'✅ Running' if overview['digital_twin_layer']['running'] else '❌ Stopped'}")
-                logger.info(f"   • Active Digital Twins: {overview['digital_twin_layer']['orchestration']['active_twins']}")
+                logger.info("Platform Status Overview:")
+                dt_running = overview['digital_twin_layer']['running']
+                logger.info(f"   Digital Twin Layer: {'Running' if dt_running else 'Stopped'}")
+                logger.info(f"   Active Digital Twins: {overview['digital_twin_layer']['orchestration']['active_twins']}")
                 
                 if 'layer_statistics' in overview:
                     if 'virtualization' in overview['layer_statistics']:
                         virt_stats = overview['layer_statistics']['virtualization']['virtualization_layer']
-                        logger.info(f"   • Virtualization Layer: {'✅ Running' if virt_stats['running'] else '❌ Stopped'}")
+                        virt_running = virt_stats['running']
+                        logger.info(f"   Virtualization Layer: {'Running' if virt_running else 'Stopped'}")
                     
                     if 'service' in overview['layer_statistics']:
                         svc_stats = overview['layer_statistics']['service']['service_layer']
-                        logger.info(f"   • Service Layer: {'✅ Running' if svc_stats['running'] else '❌ Stopped'}")
+                        svc_running = svc_stats['running']
+                        logger.info(f"   Service Layer: {'Running' if svc_running else 'Stopped'}")
                 
-                logger.info(f"   • Platform Health: {'🟢 Healthy' if overview['platform_health']['all_layers_running'] else '🟡 Degraded'}")
+                health = overview['platform_health']['all_layers_running']
+                logger.info(f"   Platform Health: {'Healthy' if health else 'Degraded'}")
                 
         except Exception as e:
             logger.warning(f"Could not retrieve platform status: {e}")
@@ -376,20 +387,20 @@ async def main():
         await platform.start()
         
         # Get API configuration
-        host = platform.config['api']['host']
-        port = platform.config['api']['port']
+        host = platform.config.get('api.host')
+        port = platform.config.get('api.port')
         
-        logger.info(f"🚀 Digital Twin Platform ready! API available at http://{host}:{port}")
-        logger.info(f"📖 API Documentation: http://{host}:{port}/docs")
-        logger.info(f"🔍 Health Check: http://{host}:{port}/health")
+        logger.info(f"Digital Twin Platform ready! API available at http://{host}:{port}")
+        logger.info(f"API Documentation: http://{host}:{port}/docs")
+        logger.info(f"Health Check: http://{host}:{port}/health")
         
         # Start API server (this will block until shutdown)
         await platform.start_api_server(host=host, port=port)
         
     except KeyboardInterrupt:
-        logger.info("🔸 Received shutdown signal")
+        logger.info("Received shutdown signal")
     except Exception as e:
-        logger.error(f"❌ Platform error: {e}")
+        logger.error(f"Platform error: {e}")
         logger.exception("Full traceback:")
         sys.exit(1)
     finally:
@@ -401,9 +412,9 @@ def sync_main():
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🔸 Application interrupted by user")
+        logger.info("Application interrupted by user")
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        logger.error(f"Fatal error: {e}")
         sys.exit(1)
 
 
@@ -415,12 +426,12 @@ if __name__ == "__main__":
     
     # Check Python version
     if sys.version_info < (3, 8):
-        print("❌ Python 3.8 or higher is required")
+        print("Python 3.8 or higher is required")
         sys.exit(1)
     
-    print("🎯 Digital Twin Platform")
+    print("Digital Twin Platform")
     print("=" * 50)
-    print("🔧 Environment Variables:")
+    print("Environment Variables:")
     print(f"   DT_ENVIRONMENT: {os.getenv('DT_ENVIRONMENT', 'development')}")
     print(f"   DT_API_HOST: {os.getenv('DT_API_HOST', '0.0.0.0')}")
     print(f"   DT_API_PORT: {os.getenv('DT_API_PORT', '8000')}")
