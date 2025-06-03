@@ -5,7 +5,6 @@ This module provides the central authentication and authorization system,
 supporting both JWT authentication for dashboard users and API key authentication
 for external applications.
 
-LOCATION: src/layers/application/auth/__init__.py
 """
 
 import asyncio
@@ -712,51 +711,3 @@ require_service_execute = require_permission(Permissions.SERVICE_EXECUTE)
 require_replica_manage = require_permission(Permissions.REPLICA_MANAGE)
 require_workflow_execute = require_permission(Permissions.WORKFLOW_EXECUTE)
 require_admin = require_permission(Permissions.ADMIN_ALL)
-
-
-# Example usage demo
-async def demo_authentication():
-    """Demonstrate authentication system capabilities."""
-    print("🔐 Digital Twin Platform - Authentication System Demo")
-    print("=" * 60)
-    
-    # Initialize authentication
-    auth_manager = await initialize_authentication()
-    
-    print(f"✅ Authentication Manager initialized")
-    print(f"📊 Status: {auth_manager.get_auth_status()}")
-    
-    # Mock authentication examples
-    print(f"\n🧪 Testing mock authentication...")
-    
-    try:
-        # Test JWT mock authentication
-        jwt_context = await auth_manager.authenticate_credentials(
-            {"username": "admin_user"},
-            AuthMethod.JWT_TOKEN
-        )
-        print(f"✅ JWT Auth: {jwt_context.subject_type.value} with {len(jwt_context.permissions)} permissions")
-        
-        # Test API key mock authentication
-        api_context = await auth_manager.authenticate_credentials(
-            {"api_key": "test-key"},
-            AuthMethod.API_KEY
-        )
-        print(f"✅ API Key Auth: {api_context.subject_type.value} with {len(api_context.permissions)} permissions")
-        
-        # Test permission checking
-        can_read_dt = jwt_context.has_permission(Permissions.DIGITAL_TWIN_READ)
-        can_write_dt = api_context.has_permission(Permissions.DIGITAL_TWIN_WRITE)
-        
-        print(f"🔍 Permission checks:")
-        print(f"   • JWT user can read DT: {can_read_dt}")
-        print(f"   • API key can write DT: {can_write_dt}")
-        
-        print(f"\n✅ Authentication system ready for integration!")
-        
-    except Exception as e:
-        print(f"❌ Demo failed: {e}")
-
-
-if __name__ == "__main__":
-    asyncio.run(demo_authentication())

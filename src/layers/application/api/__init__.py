@@ -299,17 +299,3 @@ async def start_api_server(
     await server.serve()
 
 
-# Convenience functions
-def run_api_server_sync(
-    host: str = "0.0.0.0",
-    port: int = 8000,
-    reload: bool = False
-) -> None:
-    """Run the API server synchronously."""
-    import asyncio
-    asyncio.run(start_api_server(host, port, reload))
-
-
-if __name__ == "__main__":
-    # Development server
-    run_api_server_sync(reload=True)
