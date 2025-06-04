@@ -213,33 +213,35 @@ async def list_replicas(
         )
 
 
-@router.post("/", summary="Create Digital Replica", response_model=ReplicaResponse)
-async def create_replica(
-    replica_data: ReplicaCreate,
-    gateway: APIGateway = Depends(get_gateway)
-) -> Dict[str, Any]:
-    """Create a new Digital Replica."""
+@router.post('/', summary='Create Digital Replica', response_model=ReplicaResponse)
+async def create_replica(replica_data: ReplicaCreate, gateway: APIGateway = Depends(get_gateway)) -> Dict[str, Any]:
     try:
-        # Convert Pydantic model to dict
         replica_config = replica_data.dict()
         
-        # Create Digital Replica via gateway
-        result = await gateway.create_replica(replica_config)
+        # FIX: Ensure parent_digital_twin_id is properly handled
+        if 'parent_digital_twin_id' in replica_config:
+            twin_id = replica_config['parent_digital_twin_id']
+            # Pydantic already converts to UUID, but ensure it's not None
+            if twin_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail='parent_digital_twin_id is required'
+                )
         
+        result = await gateway.create_replica(replica_config)
         return result
         
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Failed to create Digital Replica: {e}")
+        logger.error(f'Failed to create Digital Replica: {e}')
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create Digital Replica: {e}"
+            detail=f'Failed to create Digital Replica: {e}'
         )
-
 
 @router.get("/{replica_id}", summary="Get Digital Replica", response_model=ReplicaResponse)
 async def get_replica(

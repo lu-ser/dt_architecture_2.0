@@ -7,11 +7,14 @@ from enum import Enum
 from src.layers.digital_twin import get_digital_twin_orchestrator
 from src.layers.service import get_service_orchestrator
 from src.layers.virtualization import get_virtualization_orchestrator
+from src.utils.type_converter import TypeConverter
 from src.core.interfaces.digital_twin import TwinCapability
 from src.core.interfaces.service import ServiceType, ServicePriority
 from src.core.interfaces.replica import ReplicaType
+from src.utils.exceptions import ValidationError
 from src.utils.exceptions import APIGatewayError
 from src.utils.config import get_config
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 class RequestType(Enum):
@@ -74,11 +77,18 @@ class APIGateway:
 
     async def create_digital_twin(self, twin_config: Dict[str, Any], user_id: Optional[UUID]=None) -> Dict[str, Any]:
         try:
-            twin_type = twin_config['twin_type']
+            try:
+                converted_config = TypeConverter.convert_digital_twin_config(twin_config)
+            except ValidationError as e:
+                raise APIGatewayError(str(e))
+            twin_type = converted_config['twin_type']
+            capabilities = converted_config['capabilities']
             name = twin_config['name']
             description = twin_config.get('description', '')
-            capabilities = set(twin_config['capabilities'])
-            twin = await self.dt_orchestrator.create_digital_twin(twin_type=twin_type, name=name, description=description, capabilities=capabilities, template_id=twin_config.get('template_id'), customization=twin_config.get('customization'), parent_twin_id=twin_config.get('parent_twin_id'))
+            template_id = twin_config.get('template_id')
+            customization = twin_config.get('customization')
+            parent_twin_id = twin_config.get('parent_twin_id')
+            twin = await self.dt_orchestrator.create_digital_twin(twin_type=twin_type, name=name, description=description, capabilities=capabilities, template_id=template_id, customization=customization, parent_twin_id=parent_twin_id)
             logger.info(f'Created Digital Twin {twin.id} via API Gateway')
             return twin.to_dict()
         except Exception as e:
@@ -142,10 +152,19 @@ class APIGateway:
 
     async def create_replica(self, replica_config: Dict[str, Any], user_id: Optional[UUID]=None) -> Dict[str, Any]:
         try:
+            if 'parent_digital_twin_id' in replica_config:
+                twin_id = replica_config['parent_digital_twin_id']
+                if isinstance(twin_id, str):
+                    try:
+                        replica_config['parent_digital_twin_id'] = UUID(twin_id)
+                    except ValueError as e:
+                        raise APIGatewayError(f'Invalid parent_digital_twin_id format: {twin_id}')
+                elif not isinstance(twin_id, UUID):
+                    raise APIGatewayError(f'parent_digital_twin_id must be UUID or string, got {type(twin_id)}')
             if 'template_id' in replica_config:
-                replica = await self.virtualization_orchestrator.create_replica_from_template(template_id=replica_config['template_id'], parent_digital_twin_id=UUID(replica_config['parent_digital_twin_id']), device_ids=replica_config['device_ids'], overrides=replica_config.get('overrides', {}))
+                replica = await self.virtualization_orchestrator.create_replica_from_template(template_id=replica_config['template_id'], parent_digital_twin_id=replica_config['parent_digital_twin_id'], device_ids=replica_config['device_ids'], overrides=replica_config.get('overrides', {}))
             else:
-                replica = await self.virtualization_orchestrator.create_replica_from_configuration(replica_type=ReplicaType(replica_config['replica_type']), parent_digital_twin_id=UUID(replica_config['parent_digital_twin_id']), device_ids=replica_config['device_ids'], aggregation_mode=replica_config['aggregation_mode'], configuration=replica_config.get('configuration', {}))
+                replica = await self.virtualization_orchestrator.create_replica_from_configuration(replica_type=ReplicaType(replica_config['replica_type']), parent_digital_twin_id=replica_config['parent_digital_twin_id'], device_ids=replica_config['device_ids'], aggregation_mode=DataAggregationMode(replica_config['aggregation_mode']), configuration=replica_config.get('configuration', {}))
             logger.info(f'Created Digital Replica {replica.id} via API Gateway')
             return replica.to_dict()
         except Exception as e:

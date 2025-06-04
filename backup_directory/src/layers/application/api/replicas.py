@@ -103,6 +103,10 @@ async def list_replicas(gateway: APIGateway=Depends(get_gateway), replica_type: 
 async def create_replica(replica_data: ReplicaCreate, gateway: APIGateway=Depends(get_gateway)) -> Dict[str, Any]:
     try:
         replica_config = replica_data.dict()
+        if 'parent_digital_twin_id' in replica_config:
+            twin_id = replica_config['parent_digital_twin_id']
+            if twin_id is None:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='parent_digital_twin_id is required')
         result = await gateway.create_replica(replica_config)
         return result
     except ValueError as e:

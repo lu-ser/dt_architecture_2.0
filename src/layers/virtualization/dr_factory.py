@@ -401,50 +401,49 @@ class DigitalReplicaFactory(IReplicaFactory):
             "standard": StandardDataAggregator
         }
     
-    async def create(
-        self, 
-        config: Dict[str, Any], 
-        metadata: Optional[BaseMetadata] = None
-    ) -> IDigitalReplica:
-        """Create a new Digital Replica based on configuration."""
+
+    async def create(self, config: Dict[str, Any], metadata: Optional[BaseMetadata] = None) -> IDigitalReplica:
         try:
-            # Validate configuration
             if not self.validate_config(config):
-                raise FactoryConfigurationError("Invalid Digital Replica configuration")
+                raise FactoryConfigurationError('Invalid Digital Replica configuration')
             
-            # Extract configuration
-            replica_type = ReplicaType(config["replica_type"])
-            parent_dt_id = UUID(config["parent_digital_twin_id"])
-            device_ids = config["device_ids"]
-            aggregation_mode = DataAggregationMode(config["aggregation_mode"])
+            replica_type = ReplicaType(config['replica_type'])
             
-            # Create replica configuration
+            # FIX: Handle UUID conversion properly
+            parent_twin_id_raw = config['parent_digital_twin_id']
+            if isinstance(parent_twin_id_raw, UUID):
+                parent_dt_id = parent_twin_id_raw
+            elif isinstance(parent_twin_id_raw, str):
+                parent_dt_id = UUID(parent_twin_id_raw)
+            else:
+                raise FactoryConfigurationError(f'Invalid parent_digital_twin_id type: {type(parent_twin_id_raw)}')
+            
+            device_ids = config['device_ids']
+            aggregation_mode = DataAggregationMode(config['aggregation_mode'])
+            
             replica_config = ReplicaConfiguration(
                 replica_type=replica_type,
                 parent_digital_twin_id=parent_dt_id,
                 device_ids=device_ids,
                 aggregation_mode=aggregation_mode,
-                aggregation_config=config.get("aggregation_config", {}),
-                data_retention_policy=config.get("data_retention_policy", {}),
-                quality_thresholds=config.get("quality_thresholds", {}),
-                custom_config=config.get("custom_config", {})
+                aggregation_config=config.get('aggregation_config', {}),
+                data_retention_policy=config.get('data_retention_policy', {}),
+                quality_thresholds=config.get('quality_thresholds', {}),
+                custom_config=config.get('custom_config', {})
             )
             
-            # Create metadata if not provided
             if metadata is None:
                 metadata = BaseMetadata(
                     entity_id=uuid4(),
                     timestamp=datetime.now(timezone.utc),
-                    version="1.0.0",
-                    created_by=uuid4()  # Should be actual user ID
+                    version='1.0.0',
+                    created_by=uuid4()
                 )
             
-            # Create aggregator
-            aggregator_type = config.get("aggregator_type", "standard")
+            aggregator_type = config.get('aggregator_type', 'standard')
             aggregator_class = self._aggregator_registry.get(aggregator_type, StandardDataAggregator)
             aggregator = aggregator_class()
             
-            # Create replica
             replica = DigitalReplica(
                 replica_id=metadata.id,
                 configuration=replica_config,
@@ -452,13 +451,13 @@ class DigitalReplicaFactory(IReplicaFactory):
                 aggregator=aggregator
             )
             
-            logger.info(f"Created Digital Replica {metadata.id} of type {replica_type}")
+            logger.info(f'Created Digital Replica {metadata.id} of type {replica_type}')
             return replica
             
         except Exception as e:
-            logger.error(f"Failed to create Digital Replica: {e}")
-            raise EntityCreationError(f"Digital Replica creation failed: {e}")
-    
+            logger.error(f'Failed to create Digital Replica: {e}')
+            raise EntityCreationError(f'Digital Replica creation failed: {e}')
+
     async def create_replica(
         self,
         replica_type: ReplicaType,

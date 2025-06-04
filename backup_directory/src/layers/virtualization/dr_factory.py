@@ -245,7 +245,13 @@ class DigitalReplicaFactory(IReplicaFactory):
             if not self.validate_config(config):
                 raise FactoryConfigurationError('Invalid Digital Replica configuration')
             replica_type = ReplicaType(config['replica_type'])
-            parent_dt_id = UUID(config['parent_digital_twin_id'])
+            parent_twin_id_raw = config['parent_digital_twin_id']
+            if isinstance(parent_twin_id_raw, UUID):
+                parent_dt_id = parent_twin_id_raw
+            elif isinstance(parent_twin_id_raw, str):
+                parent_dt_id = UUID(parent_twin_id_raw)
+            else:
+                raise FactoryConfigurationError(f'Invalid parent_digital_twin_id type: {type(parent_twin_id_raw)}')
             device_ids = config['device_ids']
             aggregation_mode = DataAggregationMode(config['aggregation_mode'])
             replica_config = ReplicaConfiguration(replica_type=replica_type, parent_digital_twin_id=parent_dt_id, device_ids=device_ids, aggregation_mode=aggregation_mode, aggregation_config=config.get('aggregation_config', {}), data_retention_policy=config.get('data_retention_policy', {}), quality_thresholds=config.get('quality_thresholds', {}), custom_config=config.get('custom_config', {}))
