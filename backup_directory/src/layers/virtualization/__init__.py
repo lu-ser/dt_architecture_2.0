@@ -12,6 +12,8 @@ from src.layers.virtualization.ontology.manager import OntologyManager, get_onto
 from src.core.interfaces.base import BaseMetadata, EntityStatus
 from src.core.interfaces.replica import IDigitalReplica, ReplicaType, ReplicaConfiguration, DataAggregationMode, DeviceData, AggregatedData
 from tests.mocks.storage_adapter import InMemoryStorageAdapter
+from src.storage import get_twin_storage_adapter, get_global_storage_adapter
+from src.storage.adapters import get_registry_cache
 from src.utils.exceptions import DigitalReplicaError, ConfigurationError, EntityCreationError
 from src.utils.config import get_config
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ class VirtualizationLayerOrchestrator:
         self._running = False
         self.deployment_targets: Dict[str, ReplicaDeploymentTarget] = {}
         self.active_containers: Dict[UUID, DigitalReplicaContainer] = {}
+        self._registry_cache = None
         logger.info('Initialized VirtualizationLayerOrchestrator')
 
     async def initialize(self) -> None:
@@ -37,14 +40,15 @@ class VirtualizationLayerOrchestrator:
             logger.warning('VirtualizationLayerOrchestrator already initialized')
             return
         try:
-            logger.info('Initializing Virtualization Layer components...')
+            logger.info('Initializing Virtualization Layer with MongoDB + Redis...')
             self.ontology_manager = await initialize_ontology_system(self.base_templates_path)
             logger.info(f'Loaded {len(self.ontology_manager.ontologies)} ontologies and {len(self.ontology_manager.templates)} templates')
             self.factory = DigitalReplicaFactory()
             await self._integrate_factory_with_ontology()
-            storage_adapter = InMemoryStorageAdapter()
-            self.registry = DigitalReplicaRegistry(storage_adapter)
+            storage_adapter = get_global_storage_adapter(IDigitalReplica)
+            self.registry = DigitalReplicaRegistry(storage_adapter, cache_enabled=True, cache_size=2000, cache_ttl=600)
             await self.registry.connect()
+            await self._setup_enhanced_caching()
             self.lifecycle_manager = DigitalReplicaLifecycleManager(factory=self.factory, registry=self.registry)
             await self._setup_default_deployment_targets()
             self._initialized = True
@@ -52,6 +56,15 @@ class VirtualizationLayerOrchestrator:
         except Exception as e:
             logger.error(f'Failed to initialize Virtualization Layer: {e}')
             raise ConfigurationError(f'Virtualization Layer initialization failed: {e}')
+
+    async def _setup_enhanced_caching(self) -> None:
+        try:
+            self._registry_cache = await get_registry_cache()
+            if hasattr(self.registry, '_setup_redis_cache'):
+                await self.registry._setup_redis_cache(self._registry_cache)
+            logger.info('Enhanced caching setup completed')
+        except Exception as e:
+            logger.warning(f'Failed to setup enhanced caching: {e}')
 
     async def start(self) -> None:
         if not self._initialized:
@@ -104,13 +117,29 @@ class VirtualizationLayerOrchestrator:
                             break
                     else:
                         logger.warning(f'Could not validate against ontology class {ontology_class}')
-            metadata = BaseMetadata(entity_id=uuid4(), timestamp=datetime.now(timezone.utc), version=template.version, created_by=uuid4(), custom={'template_id': template_id, 'template_name': template.name, 'created_from_template': True})
+            await self._ensure_twin_storage(parent_digital_twin_id)
+            metadata = BaseMetadata(entity_id=uuid4(), timestamp=datetime.now(timezone.utc), version=template.version, created_by=uuid4(), custom={'template_id': template_id, 'template_name': template.name, 'created_from_template': True, 'parent_twin_id': str(parent_digital_twin_id)})
             replica = await self.lifecycle_manager.create_entity(config, metadata)
-            logger.info(f'Created Digital Replica {replica.id} from template {template_id}')
+            if self._registry_cache:
+                await self._registry_cache.cache_entity(replica.id, replica.to_dict(), 'DigitalReplica')
+            logger.info(f'Created Digital Replica {replica.id} from template {template_id} with persistent storage')
             return replica
         except Exception as e:
             logger.error(f'Failed to create replica from template {template_id}: {e}')
             raise EntityCreationError(f'Template-based replica creation failed: {e}')
+
+    async def _ensure_twin_storage(self, twin_id: UUID) -> None:
+        try:
+            if self.config.get('storage.separate_dbs_per_twin', True):
+                twin_storage = get_twin_storage_adapter(IDigitalReplica, twin_id)
+                await twin_storage.connect()
+                health = await twin_storage.health_check()
+                if health:
+                    logger.info(f'Twin-specific storage ready for {twin_id}')
+                else:
+                    logger.warning(f'Twin-specific storage health check failed for {twin_id}')
+        except Exception as e:
+            logger.warning(f'Failed to ensure twin storage for {twin_id}: {e}')
 
     async def create_replica_from_configuration(self, replica_type: ReplicaType, parent_digital_twin_id: UUID, device_ids: List[str], aggregation_mode: DataAggregationMode, configuration: Optional[Dict[str, Any]]=None) -> IDigitalReplica:
         if not self._initialized:
@@ -192,7 +221,24 @@ class VirtualizationLayerOrchestrator:
         container_stats = {'active_containers': len(self.active_containers), 'deployment_targets': len(self.deployment_targets), 'container_health': {}}
         for replica_id, container in self.active_containers.items():
             container_stats['container_health'][str(replica_id)] = container.get_metrics()
-        return {'virtualization_layer': {'initialized': self._initialized, 'running': self._running, 'components': {'ontology_manager': bool(self.ontology_manager), 'factory': bool(self.factory), 'registry': bool(self.registry), 'lifecycle_manager': bool(self.lifecycle_manager)}}, 'registry': registry_stats, 'management': management_stats, 'ontology': ontology_stats, 'containers': container_stats}
+        storage_stats = await self._get_storage_health()
+        return {'virtualization_layer': {'initialized': self._initialized, 'running': self._running, 'components': {'ontology_manager': bool(self.ontology_manager), 'factory': bool(self.factory), 'registry': bool(self.registry), 'lifecycle_manager': bool(self.lifecycle_manager)}}, 'registry': registry_stats, 'management': management_stats, 'ontology': ontology_stats, 'containers': container_stats, 'storage': storage_stats}
+
+    async def _get_storage_health(self) -> Dict[str, Any]:
+        health = {'primary_storage': 'unknown', 'cache_storage': 'unknown', 'registry_connected': False, 'cache_connected': False}
+        try:
+            if self.registry and hasattr(self.registry, 'storage_adapter'):
+                registry_health = await self.registry.storage_adapter.health_check()
+                health['registry_connected'] = registry_health
+                health['primary_storage'] = 'mongodb' if registry_health else 'failed'
+            if self._registry_cache:
+                cache_health = await self._registry_cache.cache.health_check()
+                health['cache_connected'] = cache_health
+                health['cache_storage'] = 'redis' if cache_health else 'failed'
+        except Exception as e:
+            logger.warning(f'Storage health check error: {e}')
+            health['error'] = str(e)
+        return health
 
     async def _integrate_factory_with_ontology(self) -> None:
         if not self.factory or not self.ontology_manager:

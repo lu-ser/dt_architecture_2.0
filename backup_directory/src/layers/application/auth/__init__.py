@@ -1,11 +1,13 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from enum import Enum
 from fastapi import HTTPException, Request, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from src.utils.exceptions import AuthenticationError
+from src.utils.config import get_config
 from src.utils.exceptions import AuthenticationError
 from src.utils.config import get_config
 logger = logging.getLogger(__name__)
@@ -80,6 +82,9 @@ class AuthenticationManager:
         self.lockout_duration = 300
         self._failed_attempts: Dict[str, List[datetime]] = {}
         self._initialized = False
+        self._redis_session_cache = None
+        self._redis_rate_limiter = None
+        self._use_redis = False
         logger.info('Authentication Manager initialized')
 
     async def initialize(self) -> None:
@@ -95,6 +100,7 @@ class AuthenticationManager:
             await self.jwt_provider.initialize()
             await self.api_key_provider.initialize()
             await self.permission_manager.initialize()
+            await self._try_initialize_redis()
             self._initialized = True
             logger.info('Authentication Manager fully initialized')
         except ImportError:
@@ -104,12 +110,35 @@ class AuthenticationManager:
             logger.error(f'Failed to initialize Authentication Manager: {e}')
             raise AuthenticationError(f'Authentication initialization failed: {e}')
 
+    async def _try_initialize_redis(self) -> None:
+        try:
+            cache_type = self.config.get('storage.cache_type', 'none')
+            if cache_type != 'redis':
+                logger.info('Redis caching disabled by configuration')
+                return
+            from src.storage.adapters import get_session_cache, get_rate_limit_cache
+            self._redis_session_cache = await get_session_cache()
+            self._redis_rate_limiter = await get_rate_limit_cache()
+            cache_health = await self._redis_session_cache.cache.health_check()
+            rate_health = await self._redis_rate_limiter.cache.health_check()
+            if cache_health and rate_health:
+                self._use_redis = True
+                logger.info('✅ Redis session cache enabled')
+            else:
+                logger.warning('Redis health check failed, using in-memory cache')
+        except ImportError:
+            logger.info('Redis storage not available, using in-memory cache')
+        except Exception as e:
+            logger.warning(f'Redis initialization failed: {e}, using in-memory cache')
+
     async def authenticate_request(self, request: Request) -> AuthContext:
         if not self._initialized:
             await self.initialize()
         auth_header = request.headers.get('Authorization')
         api_key_header = request.headers.get('X-API-Key')
+        client_ip = request.client.host if request.client else 'unknown'
         try:
+            await self._check_rate_limit(client_ip)
             if auth_header and auth_header.startswith('Bearer '):
                 token = auth_header[7:]
                 return await self._authenticate_jwt(token)
@@ -120,10 +149,28 @@ class AuthenticationManager:
                 return await self._authenticate_system_token(system_token)
             raise AuthenticationError('No authentication credentials provided')
         except Exception as e:
-            client_ip = request.client.host if request.client else 'unknown'
             logger.warning(f'Authentication failed from {client_ip}: {e}')
             await self._track_failed_attempt(client_ip)
             raise AuthenticationError(f'Authentication failed: {e}')
+
+    async def _check_rate_limit(self, client_ip: str) -> None:
+        try:
+            if self._use_redis and self._redis_rate_limiter:
+                identifier = f'auth:{client_ip}'
+                allowed, remaining = await self._redis_rate_limiter.check_rate_limit(identifier, limit=self.max_auth_attempts, window_seconds=self.lockout_duration)
+                if not allowed:
+                    raise AuthenticationError(f'Too many failed attempts. Try again later.')
+            else:
+                now = datetime.now(timezone.utc)
+                if client_ip in self._failed_attempts:
+                    cutoff = now.timestamp() - self.lockout_duration
+                    self._failed_attempts[client_ip] = [attempt for attempt in self._failed_attempts[client_ip] if attempt.timestamp() > cutoff]
+                    if len(self._failed_attempts[client_ip]) >= self.max_auth_attempts:
+                        raise AuthenticationError(f'Too many failed attempts. Try again in {self.lockout_duration} seconds.')
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            logger.warning(f'Rate limit check failed: {e}')
 
     async def authenticate_credentials(self, credentials: Dict[str, Any], auth_method: AuthMethod) -> AuthContext:
         if not self._initialized:
@@ -173,19 +220,38 @@ class AuthenticationManager:
             return False
 
     async def get_auth_context_from_cache(self, cache_key: str) -> Optional[AuthContext]:
-        if cache_key in self._auth_cache:
-            context = self._auth_cache[cache_key]
-            if not context.is_expired():
-                return context
-            else:
-                del self._auth_cache[cache_key]
+        try:
+            if self._use_redis and self._redis_session_cache:
+                session_data = await self._redis_session_cache.get_session(cache_key)
+                if session_data:
+                    return AuthContext(subject_type=AuthSubjectType(session_data['subject_type']), subject_id=UUID(session_data['subject_id']), auth_method=AuthMethod(session_data['auth_method']), permissions=session_data['permissions'], metadata=session_data.get('metadata', {}), expires_at=datetime.fromisoformat(session_data['expires_at']) if session_data.get('expires_at') else None)
+            if cache_key in self._auth_cache:
+                context = self._auth_cache[cache_key]
+                if not context.is_expired():
+                    return context
+                else:
+                    del self._auth_cache[cache_key]
+        except Exception as e:
+            logger.warning(f'Cache retrieval failed: {e}')
         return None
 
     def cache_auth_context(self, cache_key: str, context: AuthContext) -> None:
-        if len(self._auth_cache) > 1000:
-            oldest_key = min(self._auth_cache.keys())
-            del self._auth_cache[oldest_key]
-        self._auth_cache[cache_key] = context
+        try:
+            if len(self._auth_cache) > 1000:
+                oldest_key = min(self._auth_cache.keys())
+                del self._auth_cache[oldest_key]
+            self._auth_cache[cache_key] = context
+            if self._use_redis and self._redis_session_cache:
+                asyncio.create_task(self._cache_in_redis(cache_key, context))
+        except Exception as e:
+            logger.warning(f'Cache storage failed: {e}')
+
+    async def _cache_in_redis(self, cache_key: str, context: AuthContext) -> None:
+        try:
+            session_data = {'subject_type': context.subject_type.value, 'subject_id': str(context.subject_id), 'auth_method': context.auth_method.value, 'permissions': context.permissions, 'metadata': context.metadata, 'expires_at': context.expires_at.isoformat() if context.expires_at else None, 'authenticated_at': context.authenticated_at.isoformat()}
+            await self._redis_session_cache.store_session(cache_key, session_data)
+        except Exception as e:
+            logger.warning(f'Redis cache storage failed: {e}')
 
     async def invalidate_auth_cache(self, subject_id: Optional[UUID]=None) -> None:
         if subject_id:
@@ -232,9 +298,6 @@ class AuthenticationManager:
         self._failed_attempts[identifier].append(now)
         cutoff = now.timestamp() - self.lockout_duration
         self._failed_attempts[identifier] = [attempt for attempt in self._failed_attempts[identifier] if attempt.timestamp() > cutoff]
-        if len(self._failed_attempts[identifier]) >= self.max_auth_attempts:
-            logger.warning(f'Authentication lockout triggered for {identifier}')
-            raise AuthenticationError(f'Too many failed attempts. Try again in {self.lockout_duration} seconds.')
 
     async def _mock_jwt_auth(self, credentials: Dict[str, Any]) -> AuthContext:
         username = credentials.get('username', 'mock_user')
@@ -255,7 +318,7 @@ class AuthenticationManager:
         raise AuthenticationError('Invalid API key')
 
     def get_auth_status(self) -> Dict[str, Any]:
-        return {'initialized': self._initialized, 'providers': {'jwt_provider': self.jwt_provider is not None, 'api_key_provider': self.api_key_provider is not None, 'permission_manager': self.permission_manager is not None}, 'cache_size': len(self._auth_cache), 'failed_attempts': len(self._failed_attempts), 'security_settings': {'max_auth_attempts': self.max_auth_attempts, 'lockout_duration': self.lockout_duration, 'cache_timeout': self._cache_timeout}}
+        return {'initialized': self._initialized, 'providers': {'jwt_provider': self.jwt_provider is not None, 'api_key_provider': self.api_key_provider is not None, 'permission_manager': self.permission_manager is not None}, 'cache_size': len(self._auth_cache), 'failed_attempts': len(self._failed_attempts), 'redis_enabled': self._use_redis, 'redis_health': self._redis_session_cache.cache.health_check() if self._use_redis and self._redis_session_cache else None, 'security_settings': {'max_auth_attempts': self.max_auth_attempts, 'lockout_duration': self.lockout_duration, 'cache_timeout': self._cache_timeout}}
 _auth_manager: Optional[AuthenticationManager] = None
 
 def get_auth_manager() -> AuthenticationManager:

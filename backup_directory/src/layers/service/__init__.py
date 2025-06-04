@@ -8,6 +8,8 @@ from src.layers.service.service_factory import ServiceFactory, StandardService
 from src.layers.service.service_registry import ServiceRegistry, ServiceMetrics, ServiceAssociation
 from src.core.interfaces.base import BaseMetadata, EntityStatus
 from src.core.interfaces.service import IService, ServiceType, ServiceDefinition, ServiceConfiguration, ServiceExecutionMode, ServiceState, ServicePriority, ServiceRequest, ServiceResponse
+from src.storage import get_twin_storage_adapter, get_global_storage_adapter
+from src.storage.adapters import get_registry_cache, get_session_cache
 from tests.mocks.storage_adapter import InMemoryStorageAdapter
 from src.layers.virtualization.ontology.manager import get_ontology_manager, TemplateType
 from src.utils.exceptions import ServiceError, ServiceConfigurationError, EntityCreationError
@@ -25,20 +27,23 @@ class ServiceLayerOrchestrator:
         self._running = False
         self.active_workflows: Dict[UUID, Dict[str, Any]] = {}
         self.service_dependencies: Dict[UUID, Set[UUID]] = {}
-        logger.info('Initialized ServiceLayerOrchestrator')
+        self._registry_cache = None
+        self._session_cache = None
+        logger.info('Initialized ServiceLayerOrchestrator with enhanced storage')
 
     async def initialize(self) -> None:
         if self._initialized:
             logger.warning('ServiceLayerOrchestrator already initialized')
             return
         try:
-            logger.info('Initializing Service Layer components...')
+            logger.info('Initializing Service Layer with MongoDB + Redis...')
             self.factory = ServiceFactory()
             logger.info('Service Factory initialized')
-            storage_adapter = InMemoryStorageAdapter()
-            self.registry = ServiceRegistry(storage_adapter)
+            storage_adapter = get_global_storage_adapter(IService)
+            self.registry = ServiceRegistry(storage_adapter, cache_enabled=True, cache_size=1500, cache_ttl=600)
             await self.registry.connect()
-            logger.info('Service Registry initialized')
+            logger.info('Service Registry initialized with persistent storage')
+            await self._setup_enhanced_caching()
             if self.templates_integration:
                 await self._integrate_with_templates()
             await self._load_default_service_definitions()
@@ -47,6 +52,16 @@ class ServiceLayerOrchestrator:
         except Exception as e:
             logger.error(f'Failed to initialize Service Layer: {e}')
             raise ServiceConfigurationError(f'Service Layer initialization failed: {e}')
+
+    async def _setup_enhanced_caching(self) -> None:
+        try:
+            self._registry_cache = await get_registry_cache()
+            self._session_cache = await get_session_cache()
+            if hasattr(self.registry, '_setup_redis_cache'):
+                await self.registry._setup_redis_cache(self._registry_cache)
+            logger.info('Service Layer caching setup completed')
+        except Exception as e:
+            logger.warning(f'Failed to setup service caching: {e}')
 
     async def start(self) -> None:
         if not self._initialized:
@@ -87,14 +102,40 @@ class ServiceLayerOrchestrator:
             config = ontology_manager.apply_template(template_id, overrides)
             config['digital_twin_id'] = str(digital_twin_id)
             config['instance_name'] = instance_name
-            metadata = BaseMetadata(entity_id=uuid4(), timestamp=datetime.now(timezone.utc), version=template.version, created_by=uuid4(), custom={'template_id': template_id, 'template_name': template.name, 'created_from_template': True})
+            await self._ensure_twin_service_storage(digital_twin_id)
+            metadata = BaseMetadata(entity_id=uuid4(), timestamp=datetime.now(timezone.utc), version=template.version, created_by=uuid4(), custom={'template_id': template_id, 'template_name': template.name, 'created_from_template': True, 'digital_twin_id': str(digital_twin_id)})
             service = await self.factory.create(config, metadata)
-            await self.registry.register_service(service)
+            associations = [ServiceAssociation(service_id=service.id, digital_twin_id=digital_twin_id, association_type='provides_capability')]
+            await self.registry.register_service(service, associations)
+            if self._registry_cache:
+                await self._registry_cache.cache_entity(service.id, service.to_dict(), 'Service')
             logger.info(f'Created Service {service.id} from template {template_id}')
             return service
         except Exception as e:
             logger.error(f'Failed to create service from template {template_id}: {e}')
             raise EntityCreationError(f'Template-based service creation failed: {e}')
+
+    async def _ensure_twin_service_storage(self, twin_id: UUID) -> None:
+        try:
+            if self.config.get('storage.separate_dbs_per_twin', True):
+                twin_storage = get_twin_storage_adapter(IService, twin_id)
+                await twin_storage.connect()
+                health = await twin_storage.health_check()
+                if health:
+                    logger.debug(f'Twin service storage ready for {twin_id}')
+                else:
+                    logger.warning(f'Twin service storage health check failed for {twin_id}')
+        except Exception as e:
+            logger.warning(f'Failed to ensure twin service storage for {twin_id}: {e}')
+
+    async def create_workflow(self, workflow_name: str, service_chain: List[Dict[str, Any]], digital_twin_id: UUID, workflow_config: Optional[Dict[str, Any]]=None) -> UUID:
+        workflow_id = uuid4()
+        workflow = {'workflow_id': workflow_id, 'workflow_name': workflow_name, 'digital_twin_id': digital_twin_id, 'service_chain': service_chain, 'workflow_config': workflow_config or {}, 'created_at': datetime.now(timezone.utc), 'status': 'created', 'execution_history': []}
+        self.active_workflows[workflow_id] = workflow
+        if self._session_cache:
+            await self._session_cache.store_session(f'service_workflow_{workflow_id}', workflow)
+        logger.info(f'Created service workflow {workflow_name} with ID {workflow_id}')
+        return workflow_id
 
     async def create_service_from_definition(self, definition_id: str, digital_twin_id: UUID, instance_name: str, parameters: Optional[Dict[str, Any]]=None, execution_config: Optional[Dict[str, Any]]=None) -> IService:
         if not self._initialized:
@@ -230,7 +271,8 @@ class ServiceLayerOrchestrator:
         for workflow in self.active_workflows.values():
             status = workflow['status']
             workflow_stats['workflows_by_status'][status] = workflow_stats['workflows_by_status'].get(status, 0) + 1
-        return {'service_layer': {'initialized': self._initialized, 'running': self._running, 'templates_integration': self.templates_integration, 'components': {'factory': bool(self.factory), 'registry': bool(self.registry)}}, 'registry': registry_stats, 'factory': factory_stats, 'workflows': workflow_stats}
+        storage_health = await self._get_storage_health()
+        return {'service_layer': {'initialized': self._initialized, 'running': self._running, 'templates_integration': self.templates_integration, 'components': {'factory': bool(self.factory), 'registry': bool(self.registry)}}, 'registry': registry_stats, 'factory': factory_stats, 'workflows': workflow_stats, 'storage': storage_health}
 
     async def _integrate_with_templates(self) -> None:
         try:
@@ -239,6 +281,22 @@ class ServiceLayerOrchestrator:
         except Exception as e:
             logger.warning(f'Failed to integrate with template system: {e}')
             self.templates_integration = False
+
+    async def _get_storage_health(self) -> Dict[str, Any]:
+        health = {'primary_storage': 'unknown', 'cache_storage': 'unknown', 'registry_connected': False, 'cache_connected': False}
+        try:
+            if self.registry and hasattr(self.registry, 'storage_adapter'):
+                registry_health = await self.registry.storage_adapter.health_check()
+                health['registry_connected'] = registry_health
+                health['primary_storage'] = 'mongodb' if registry_health else 'failed'
+            if self._registry_cache:
+                cache_health = await self._registry_cache.cache.health_check()
+                health['cache_connected'] = cache_health
+                health['cache_storage'] = 'redis' if cache_health else 'failed'
+        except Exception as e:
+            logger.warning(f'Service storage health check error: {e}')
+            health['error'] = str(e)
+        return health
 
     async def _load_default_service_definitions(self) -> None:
         if not self.factory or not self.registry:

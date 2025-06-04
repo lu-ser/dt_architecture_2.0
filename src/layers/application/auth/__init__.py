@@ -7,15 +7,17 @@ for external applications.
 
 """
 
+
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from enum import Enum
-
 from fastapi import HTTPException, Request, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from src.utils.exceptions import AuthenticationError
+from src.utils.config import get_config
 
 from src.utils.exceptions import (
     AuthenticationError
@@ -31,31 +33,17 @@ class AuthSubjectType(Enum):
     APPLICATION = "application" # External app with API key
     SYSTEM = "system"          # Internal system operations
 
-
 class AuthMethod(Enum):
     """Authentication methods supported."""
     JWT_TOKEN = "jwt_token"
     API_KEY = "api_key"
-    SYSTEM_TOKEN = "system_token"
+    SYSTEM_TOKEN  = 'system_token'
 
 
 class AuthContext:
-    """
-    Authentication context for authenticated requests.
-    
-    Contains all information about the authenticated subject
-    and their permissions within the platform.
-    """
-    
-    def __init__(
-        self,
-        subject_type: AuthSubjectType,
-        subject_id: UUID,
-        auth_method: AuthMethod,
-        permissions: List[str],
-        metadata: Optional[Dict[str, Any]] = None,
-        expires_at: Optional[datetime] = None
-    ):
+    def __init__(self, subject_type: AuthSubjectType, subject_id: UUID, auth_method: AuthMethod, 
+                 permissions: List[str], metadata: Optional[Dict[str, Any]]=None, 
+                 expires_at: Optional[datetime]=None):
         self.subject_type = subject_type
         self.subject_id = subject_id
         self.auth_method = auth_method
@@ -65,8 +53,6 @@ class AuthContext:
         self.authenticated_at = datetime.now(timezone.utc)
     
     def has_permission(self, permission: str) -> bool:
-        """Check if the subject has a specific permission."""
-        # Support for wildcard permissions (admin:* grants all admin permissions)
         for perm in self.permissions:
             if perm == permission:
                 return True
@@ -75,44 +61,33 @@ class AuthContext:
         return False
     
     def has_any_permission(self, permissions: List[str]) -> bool:
-        """Check if the subject has any of the specified permissions."""
-        return any(self.has_permission(perm) for perm in permissions)
-    
+        return any((self.has_permission(perm) for perm in permissions))
+
     def has_all_permissions(self, permissions: List[str]) -> bool:
-        """Check if the subject has all of the specified permissions."""
-        return all(self.has_permission(perm) for perm in permissions)
+        return all((self.has_permission(perm) for perm in permissions))
     
     def is_expired(self) -> bool:
-        """Check if the authentication context has expired."""
         if not self.expires_at:
             return False
         return datetime.now(timezone.utc) > self.expires_at
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert auth context to dictionary representation."""
         return {
-            "subject_type": self.subject_type.value,
-            "subject_id": str(self.subject_id),
-            "auth_method": self.auth_method.value,
-            "permissions": self.permissions,
-            "metadata": self.metadata,
-            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
-            "authenticated_at": self.authenticated_at.isoformat()
+            'subject_type': self.subject_type.value, 
+            'subject_id': str(self.subject_id), 
+            'auth_method': self.auth_method.value, 
+            'permissions': self.permissions, 
+            'metadata': self.metadata, 
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None, 
+            'authenticated_at': self.authenticated_at.isoformat()
         }
 
 
 class AuthSubject:
     """Represents an authenticated subject (user or application)."""
     
-    def __init__(
-        self,
-        subject_id: UUID,
-        subject_type: AuthSubjectType,
-        name: str,
-        permissions: List[str],
-        metadata: Optional[Dict[str, Any]] = None,
-        is_active: bool = True
-    ):
+    def __init__(self, subject_id: UUID, subject_type: AuthSubjectType, name: str, 
+                 permissions: List[str], metadata: Optional[Dict[str, Any]]=None, is_active: bool=True):
         self.subject_id = subject_id
         self.subject_type = subject_type
         self.name = name
@@ -122,15 +97,14 @@ class AuthSubject:
         self.created_at = datetime.now(timezone.utc)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert subject to dictionary representation."""
         return {
-            "subject_id": str(self.subject_id),
-            "subject_type": self.subject_type.value,
-            "name": self.name,
-            "permissions": self.permissions,
-            "metadata": self.metadata,
-            "is_active": self.is_active,
-            "created_at": self.created_at.isoformat()
+            'subject_id': str(self.subject_id), 
+            'subject_type': self.subject_type.value, 
+            'name': self.name, 
+            'permissions': self.permissions, 
+            'metadata': self.metadata, 
+            'is_active': self.is_active, 
+            'created_at': self.created_at.isoformat()
         }
 
 
@@ -145,33 +119,30 @@ class AuthenticationManager:
     
     def __init__(self):
         self.config = get_config()
-        
-        # Will be initialized with actual providers in the next files
         self.jwt_provider = None
         self.api_key_provider = None
         self.permission_manager = None
         
-        # Authentication cache for performance
+        # In-memory cache (fallback when Redis not available)
         self._auth_cache: Dict[str, AuthContext] = {}
-        self._cache_timeout = 300  # 5 minutes
-        
-        # Security settings
+        self._cache_timeout = 300
         self.max_auth_attempts = 5
-        self.lockout_duration = 300  # 5 minutes
+        self.lockout_duration = 300
         self._failed_attempts: Dict[str, List[datetime]] = {}
-        
         self._initialized = False
         
-        logger.info("Authentication Manager initialized")
+        # NEW: Redis session cache (optional)
+        self._redis_session_cache = None
+        self._redis_rate_limiter = None
+        self._use_redis = False
+        
+        logger.info('Authentication Manager initialized')
     
     async def initialize(self) -> None:
-        """Initialize authentication providers."""
         if self._initialized:
             return
-        
         try:
-            # Import and initialize providers
-            # These will be implemented in the next files
+            # Initialize auth providers
             from .jwt_auth import JWTProvider
             from .api_key_auth import APIKeyProvider
             from .permissions import PermissionManager
@@ -180,345 +151,347 @@ class AuthenticationManager:
             self.api_key_provider = APIKeyProvider()
             self.permission_manager = PermissionManager()
             
-            # Initialize providers
             await self.jwt_provider.initialize()
             await self.api_key_provider.initialize()
             await self.permission_manager.initialize()
             
+            # NEW: Try to initialize Redis (optional)
+            await self._try_initialize_redis()
+            
             self._initialized = True
-            logger.info("Authentication Manager fully initialized")
+            logger.info('Authentication Manager fully initialized')
             
         except ImportError:
-            # Providers not yet implemented - use mock mode
-            logger.warning("Authentication providers not yet implemented, using mock mode")
+            logger.warning('Authentication providers not yet implemented, using mock mode')
             self._initialized = True
         except Exception as e:
-            logger.error(f"Failed to initialize Authentication Manager: {e}")
-            raise AuthenticationError(f"Authentication initialization failed: {e}")
+            logger.error(f'Failed to initialize Authentication Manager: {e}')
+            raise AuthenticationError(f'Authentication initialization failed: {e}')
     
+    async def _try_initialize_redis(self) -> None:
+        """Try to initialize Redis caching (graceful fallback to memory)."""
+        try:
+            # Only initialize Redis if storage is configured for it
+            cache_type = self.config.get('storage.cache_type', 'none')
+            if cache_type != 'redis':
+                logger.info('Redis caching disabled by configuration')
+                return
+            
+            # Try to import and initialize Redis cache
+            from src.storage.adapters import get_session_cache, get_rate_limit_cache
+            
+            self._redis_session_cache = await get_session_cache()
+            self._redis_rate_limiter = await get_rate_limit_cache()
+            
+            # Test Redis connection
+            cache_health = await self._redis_session_cache.cache.health_check()
+            rate_health = await self._redis_rate_limiter.cache.health_check()
+            
+            if cache_health and rate_health:
+                self._use_redis = True
+                logger.info('✅ Redis session cache enabled')
+            else:
+                logger.warning('Redis health check failed, using in-memory cache')
+                
+        except ImportError:
+            logger.info('Redis storage not available, using in-memory cache')
+        except Exception as e:
+            logger.warning(f'Redis initialization failed: {e}, using in-memory cache')
+
+
     async def authenticate_request(self, request: Request) -> AuthContext:
-        """
-        Authenticate an incoming request using various methods.
-        
-        Args:
-            request: FastAPI request object
-            
-        Returns:
-            AuthContext for the authenticated subject
-            
-        Raises:
-            AuthenticationError: If authentication fails
-        """
         if not self._initialized:
             await self.initialize()
-        
-        # Extract authentication credentials
-        auth_header = request.headers.get("Authorization")
-        api_key_header = request.headers.get("X-API-Key")
-        
-        # Try different authentication methods
-        try:
-            # 1. Try JWT Authentication
-            if auth_header and auth_header.startswith("Bearer "):
-                token = auth_header[7:]  # Remove "Bearer " prefix
-                return await self._authenticate_jwt(token)
             
-            # 2. Try API Key Authentication
+        auth_header = request.headers.get('Authorization')
+        api_key_header = request.headers.get('X-API-Key')
+        client_ip = request.client.host if request.client else 'unknown'
+        
+        try:
+            # NEW: Rate limiting with Redis or fallback
+            await self._check_rate_limit(client_ip)
+            
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+                return await self._authenticate_jwt(token)
             if api_key_header:
                 return await self._authenticate_api_key(api_key_header)
-            
-            # 3. Check for system token (internal operations)
-            system_token = request.headers.get("X-System-Token")
+            system_token = request.headers.get('X-System-Token')
             if system_token:
                 return await self._authenticate_system_token(system_token)
-            
-            # No authentication provided
-            raise AuthenticationError("No authentication credentials provided")
+                
+            raise AuthenticationError('No authentication credentials provided')
             
         except Exception as e:
-            # Log authentication attempt
-            client_ip = request.client.host if request.client else "unknown"
-            logger.warning(f"Authentication failed from {client_ip}: {e}")
-            
-            # Track failed attempts for rate limiting
+            logger.warning(f'Authentication failed from {client_ip}: {e}')
             await self._track_failed_attempt(client_ip)
+            raise AuthenticationError(f'Authentication failed: {e}')
+    async def _check_rate_limit(self, client_ip: str) -> None:
+        """Check rate limiting with Redis or fallback to memory."""
+        try:
+            if self._use_redis and self._redis_rate_limiter:
+                # Use Redis rate limiting
+                identifier = f"auth:{client_ip}"
+                allowed, remaining = await self._redis_rate_limiter.check_rate_limit(
+                    identifier, limit=self.max_auth_attempts, window_seconds=self.lockout_duration
+                )
+                
+                if not allowed:
+                    raise AuthenticationError(f'Too many failed attempts. Try again later.')
+            else:
+                # Fallback to original memory-based rate limiting
+                now = datetime.now(timezone.utc)
+                if client_ip in self._failed_attempts:
+                    cutoff = now.timestamp() - self.lockout_duration
+                    self._failed_attempts[client_ip] = [
+                        attempt for attempt in self._failed_attempts[client_ip] 
+                        if attempt.timestamp() > cutoff
+                    ]
+                    
+                    if len(self._failed_attempts[client_ip]) >= self.max_auth_attempts:
+                        raise AuthenticationError(f'Too many failed attempts. Try again in {self.lockout_duration} seconds.')
+                        
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            logger.warning(f'Rate limit check failed: {e}')
             
-            raise AuthenticationError(f"Authentication failed: {e}")
-    
-    async def authenticate_credentials(
-        self,
-        credentials: Dict[str, Any],
-        auth_method: AuthMethod
-    ) -> AuthContext:
-        """
-        Authenticate using provided credentials.
-        
-        Args:
-            credentials: Authentication credentials
-            auth_method: Method to use for authentication
-            
-        Returns:
-            AuthContext for the authenticated subject
-        """
+    async def authenticate_credentials(self, credentials: Dict[str, Any], auth_method: AuthMethod) -> AuthContext:
         if not self._initialized:
             await self.initialize()
-        
         try:
             if auth_method == AuthMethod.JWT_TOKEN:
                 if self.jwt_provider:
                     return await self.jwt_provider.authenticate(credentials)
                 else:
                     return await self._mock_jwt_auth(credentials)
-            
             elif auth_method == AuthMethod.API_KEY:
                 if self.api_key_provider:
                     return await self.api_key_provider.authenticate(credentials)
                 else:
                     return await self._mock_api_key_auth(credentials)
-            
             else:
-                raise AuthenticationError(f"Unsupported authentication method: {auth_method}")
-                
+                raise AuthenticationError(f'Unsupported authentication method: {auth_method}')
         except Exception as e:
-            logger.error(f"Credential authentication failed: {e}")
-            raise AuthenticationError(f"Authentication failed: {e}")
+            logger.error(f'Credential authentication failed: {e}')
+            raise AuthenticationError(f'Authentication failed: {e}')
     
-    async def authorize_operation(
-        self,
-        auth_context: AuthContext,
-        operation: str,
-        resource: str,
-        resource_id: Optional[UUID] = None
-    ) -> bool:
-        """
-        Authorize an operation for an authenticated subject.
-        
-        Args:
-            auth_context: Authentication context
-            operation: Operation to authorize (read, write, execute, etc.)
-            resource: Resource type (digital_twin, service, replica, etc.)
-            resource_id: Optional specific resource ID
-            
-        Returns:
-            True if authorized, False otherwise
-        """
+    async def authorize_operation(self, auth_context: AuthContext, operation: str, resource: str, resource_id: Optional[UUID]=None) -> bool:
         if not self._initialized:
             await self.initialize()
-        
         try:
-            # Check if auth context is expired
             if auth_context.is_expired():
-                logger.warning(f"Expired auth context for {auth_context.subject_id}")
+                logger.warning(f'Expired auth context for {auth_context.subject_id}')
                 return False
-            
-            # Build permission string
+                
             if resource_id:
-                permission = f"{resource}:{resource_id}:{operation}"
-                # Also check for general resource permission
-                general_permission = f"{resource}:{operation}"
+                permission = f'{resource}:{resource_id}:{operation}'
+                general_permission = f'{resource}:{operation}'
             else:
-                permission = f"{resource}:{operation}"
+                permission = f'{resource}:{operation}'
                 general_permission = permission
-            
-            # Check permissions
+                
             if auth_context.has_permission(permission):
                 return True
-            
             if resource_id and auth_context.has_permission(general_permission):
                 return True
-            
-            # Check for admin permissions
-            if auth_context.has_permission("admin:*"):
+            if auth_context.has_permission('admin:*'):
                 return True
-            
-            # Use permission manager if available
+                
             if self.permission_manager:
-                return await self.permission_manager.check_permission(
-                    auth_context, operation, resource, resource_id
-                )
-            
-            logger.warning(
-                f"Authorization denied for {auth_context.subject_id}: "
-                f"{operation} on {resource}:{resource_id}"
-            )
+                return await self.permission_manager.check_permission(auth_context, operation, resource, resource_id)
+                
+            logger.warning(f'Authorization denied for {auth_context.subject_id}: {operation} on {resource}:{resource_id}')
             return False
-            
         except Exception as e:
-            logger.error(f"Authorization check failed: {e}")
+            logger.error(f'Authorization check failed: {e}')
             return False
     
     async def get_auth_context_from_cache(self, cache_key: str) -> Optional[AuthContext]:
-        """Get authentication context from cache."""
-        if cache_key in self._auth_cache:
-            context = self._auth_cache[cache_key]
-            if not context.is_expired():
-                return context
-            else:
-                # Remove expired context
-                del self._auth_cache[cache_key]
+        """Get auth context from cache (Redis or memory)."""
+        try:
+            if self._use_redis and self._redis_session_cache:
+                # Try Redis first
+                session_data = await self._redis_session_cache.get_session(cache_key)
+                if session_data:
+                    # Convert session data back to AuthContext
+                    return AuthContext(
+                        subject_type=AuthSubjectType(session_data['subject_type']),
+                        subject_id=UUID(session_data['subject_id']),
+                        auth_method=AuthMethod(session_data['auth_method']),
+                        permissions=session_data['permissions'],
+                        metadata=session_data.get('metadata', {}),
+                        expires_at=datetime.fromisoformat(session_data['expires_at']) if session_data.get('expires_at') else None
+                    )
+            
+            # Fallback to memory cache
+            if cache_key in self._auth_cache:
+                context = self._auth_cache[cache_key]
+                if not context.is_expired():
+                    return context
+                else:
+                    del self._auth_cache[cache_key]
+        except Exception as e:
+            logger.warning(f'Cache retrieval failed: {e}')
+        
         return None
     
     def cache_auth_context(self, cache_key: str, context: AuthContext) -> None:
-        """Cache authentication context for performance."""
-        # Limit cache size
-        if len(self._auth_cache) > 1000:
-            # Remove oldest entries
-            oldest_key = min(self._auth_cache.keys())
-            del self._auth_cache[oldest_key]
-        
-        self._auth_cache[cache_key] = context
+        """Cache auth context (Redis + memory)."""
+        try:
+            # Always cache in memory as fallback
+            if len(self._auth_cache) > 1000:
+                oldest_key = min(self._auth_cache.keys())
+                del self._auth_cache[oldest_key]
+            self._auth_cache[cache_key] = context
+            
+            # Also cache in Redis if available
+            if self._use_redis and self._redis_session_cache:
+                asyncio.create_task(self._cache_in_redis(cache_key, context))
+                
+        except Exception as e:
+            logger.warning(f'Cache storage failed: {e}')
     
-    async def invalidate_auth_cache(self, subject_id: Optional[UUID] = None) -> None:
-        """Invalidate authentication cache."""
+    async def _cache_in_redis(self, cache_key: str, context: AuthContext) -> None:
+        """Store auth context in Redis."""
+        try:
+            session_data = {
+                'subject_type': context.subject_type.value,
+                'subject_id': str(context.subject_id),
+                'auth_method': context.auth_method.value,
+                'permissions': context.permissions,
+                'metadata': context.metadata,
+                'expires_at': context.expires_at.isoformat() if context.expires_at else None,
+                'authenticated_at': context.authenticated_at.isoformat()
+            }
+            await self._redis_session_cache.store_session(cache_key, session_data)
+        except Exception as e:
+            logger.warning(f'Redis cache storage failed: {e}')
+
+    async def invalidate_auth_cache(self, subject_id: Optional[UUID]=None) -> None:
         if subject_id:
-            # Remove specific subject from cache
-            keys_to_remove = [
-                key for key, context in self._auth_cache.items()
-                if context.subject_id == subject_id
-            ]
+            # Invalidate from memory cache
+            keys_to_remove = [key for key, context in self._auth_cache.items() if context.subject_id == subject_id]
             for key in keys_to_remove:
                 del self._auth_cache[key]
+            
+            # Invalidate from Redis (this would need a more sophisticated implementation)
+            # For now, we rely on TTL expiration
         else:
-            # Clear entire cache
             self._auth_cache.clear()
+            # Clear Redis namespace if needed
     
     async def _authenticate_jwt(self, token: str) -> AuthContext:
-        """Authenticate using JWT token."""
-        # Check cache first
-        cache_key = f"jwt:{token[:16]}"  # Use token prefix as cache key
+        cache_key = f'jwt:{token[:16]}'
         cached_context = await self.get_auth_context_from_cache(cache_key)
         if cached_context:
             return cached_context
-        
+            
         if self.jwt_provider:
             context = await self.jwt_provider.validate_token(token)
         else:
             context = await self._mock_jwt_validation(token)
-        
-        # Cache the context
+            
         self.cache_auth_context(cache_key, context)
         return context
     
     async def _authenticate_api_key(self, api_key: str) -> AuthContext:
-        """Authenticate using API key."""
-        # Check cache first
-        cache_key = f"api_key:{api_key[:16]}"
+        cache_key = f'api_key:{api_key[:16]}'
         cached_context = await self.get_auth_context_from_cache(cache_key)
         if cached_context:
             return cached_context
-        
+            
         if self.api_key_provider:
             context = await self.api_key_provider.validate_api_key(api_key)
         else:
             context = await self._mock_api_key_validation(api_key)
-        
-        # Cache the context
+            
         self.cache_auth_context(cache_key, context)
         return context
     
     async def _authenticate_system_token(self, system_token: str) -> AuthContext:
-        """Authenticate using system token for internal operations."""
-        # Simple system token validation
-        expected_token = self.config.get("system", {}).get("internal_token", "system-token-123")
-        
+        expected_token = self.config.get('system', {}).get('internal_token', 'system-token-123')
         if system_token != expected_token:
-            raise AuthenticationError("Invalid system token")
-        
-        # Return system context with all permissions
+            raise AuthenticationError('Invalid system token')
         return AuthContext(
-            subject_type=AuthSubjectType.SYSTEM,
-            subject_id=UUID("00000000-0000-0000-0000-000000000000"),
-            auth_method=AuthMethod.SYSTEM_TOKEN,
-            permissions=["admin:*"],
-            metadata={"system": True}
+            subject_type=AuthSubjectType.SYSTEM, 
+            subject_id=UUID('00000000-0000-0000-0000-000000000000'), 
+            auth_method=AuthMethod.SYSTEM_TOKEN, 
+            permissions=['admin:*'], 
+            metadata={'system': True}
         )
     
     async def _track_failed_attempt(self, identifier: str) -> None:
-        """Track failed authentication attempts for rate limiting."""
         now = datetime.now(timezone.utc)
-        
         if identifier not in self._failed_attempts:
             self._failed_attempts[identifier] = []
-        
-        # Add current attempt
         self._failed_attempts[identifier].append(now)
         
-        # Remove old attempts (outside lockout window)
         cutoff = now.timestamp() - self.lockout_duration
         self._failed_attempts[identifier] = [
-            attempt for attempt in self._failed_attempts[identifier]
+            attempt for attempt in self._failed_attempts[identifier] 
             if attempt.timestamp() > cutoff
         ]
-        
-        # Check if lockout threshold exceeded
-        if len(self._failed_attempts[identifier]) >= self.max_auth_attempts:
-            logger.warning(f"Authentication lockout triggered for {identifier}")
-            raise AuthenticationError(
-                f"Too many failed attempts. Try again in {self.lockout_duration} seconds."
-            )
     
     # Mock authentication methods for development (until providers are implemented)
     async def _mock_jwt_auth(self, credentials: Dict[str, Any]) -> AuthContext:
-        """Mock JWT authentication for development."""
-        username = credentials.get("username", "mock_user")
+        username = credentials.get('username', 'mock_user')
         return AuthContext(
-            subject_type=AuthSubjectType.USER,
-            subject_id=UUID("12345678-1234-1234-1234-123456789012"),
-            auth_method=AuthMethod.JWT_TOKEN,
-            permissions=["digital_twin:*", "service:*", "replica:*"],
-            metadata={"username": username, "mock": True}
+            subject_type=AuthSubjectType.USER, 
+            subject_id=UUID('12345678-1234-1234-1234-123456789012'), 
+            auth_method=AuthMethod.JWT_TOKEN, 
+            permissions=['digital_twin:*', 'service:*', 'replica:*'], 
+            metadata={'username': username, 'mock': True}
         )
     
     async def _mock_jwt_validation(self, token: str) -> AuthContext:
-        """Mock JWT token validation for development."""
-        if token == "mock-jwt-token":
+        if token == 'mock-jwt-token':
             return AuthContext(
-                subject_type=AuthSubjectType.USER,
-                subject_id=UUID("12345678-1234-1234-1234-123456789012"),
-                auth_method=AuthMethod.JWT_TOKEN,
-                permissions=["digital_twin:*", "service:*", "replica:*"],
-                metadata={"username": "mock_user", "mock": True}
+                subject_type=AuthSubjectType.USER, 
+                subject_id=UUID('12345678-1234-1234-1234-123456789012'), 
+                auth_method=AuthMethod.JWT_TOKEN, 
+                permissions=['digital_twin:*', 'service:*', 'replica:*'], 
+                metadata={'username': 'mock_user', 'mock': True}
             )
-        raise AuthenticationError("Invalid JWT token")
+        raise AuthenticationError('Invalid JWT token')
     
     async def _mock_api_key_auth(self, credentials: Dict[str, Any]) -> AuthContext:
-        """Mock API key authentication for development."""
-        api_key = credentials.get("api_key", "mock-api-key")
+        api_key = credentials.get('api_key', 'mock-api-key')
         return AuthContext(
-            subject_type=AuthSubjectType.APPLICATION,
-            subject_id=UUID("87654321-4321-4321-4321-210987654321"),
-            auth_method=AuthMethod.API_KEY,
-            permissions=["digital_twin:read", "service:execute"],
-            metadata={"application": "mock_app", "mock": True}
+            subject_type=AuthSubjectType.APPLICATION, 
+            subject_id=UUID('87654321-4321-4321-4321-210987654321'), 
+            auth_method=AuthMethod.API_KEY, 
+            permissions=['digital_twin:read', 'service:execute'], 
+            metadata={'application': 'mock_app', 'mock': True}
         )
-    
+
     async def _mock_api_key_validation(self, api_key: str) -> AuthContext:
-        """Mock API key validation for development."""
-        if api_key == "mock-api-key-123":
+        if api_key == 'mock-api-key-123':
             return AuthContext(
-                subject_type=AuthSubjectType.APPLICATION,
-                subject_id=UUID("87654321-4321-4321-4321-210987654321"),
-                auth_method=AuthMethod.API_KEY,
-                permissions=["digital_twin:read", "service:execute"],
-                metadata={"application": "mock_app", "mock": True}
+                subject_type=AuthSubjectType.APPLICATION, 
+                subject_id=UUID('87654321-4321-4321-4321-210987654321'), 
+                auth_method=AuthMethod.API_KEY, 
+                permissions=['digital_twin:read', 'service:execute'], 
+                metadata={'application': 'mock_app', 'mock': True}
             )
-        raise AuthenticationError("Invalid API key")
+        raise AuthenticationError('Invalid API key')
     
     def get_auth_status(self) -> Dict[str, Any]:
-        """Get authentication system status."""
         return {
-            "initialized": self._initialized,
-            "providers": {
-                "jwt_provider": self.jwt_provider is not None,
-                "api_key_provider": self.api_key_provider is not None,
-                "permission_manager": self.permission_manager is not None
+            'initialized': self._initialized,
+            'providers': {
+                'jwt_provider': self.jwt_provider is not None,
+                'api_key_provider': self.api_key_provider is not None,
+                'permission_manager': self.permission_manager is not None
             },
-            "cache_size": len(self._auth_cache),
-            "failed_attempts": len(self._failed_attempts),
-            "security_settings": {
-                "max_auth_attempts": self.max_auth_attempts,
-                "lockout_duration": self.lockout_duration,
-                "cache_timeout": self._cache_timeout
+            'cache_size': len(self._auth_cache),
+            'failed_attempts': len(self._failed_attempts),
+            'redis_enabled': self._use_redis,  # NEW
+            'redis_health': self._redis_session_cache.cache.health_check() if self._use_redis and self._redis_session_cache else None,  # NEW
+            'security_settings': {
+                'max_auth_attempts': self.max_auth_attempts,
+                'lockout_duration': self.lockout_duration,
+                'cache_timeout': self._cache_timeout
             }
         }
 
@@ -528,15 +501,12 @@ _auth_manager: Optional[AuthenticationManager] = None
 
 
 def get_auth_manager() -> AuthenticationManager:
-    """Get the global authentication manager instance."""
     global _auth_manager
     if _auth_manager is None:
         _auth_manager = AuthenticationManager()
     return _auth_manager
 
-
 async def initialize_authentication() -> AuthenticationManager:
-    """Initialize the authentication system."""
     global _auth_manager
     _auth_manager = AuthenticationManager()
     await _auth_manager.initialize()

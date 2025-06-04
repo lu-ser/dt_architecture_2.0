@@ -3,6 +3,8 @@ Mock storage adapter for testing the Digital Twin Platform.
 
 Provides in-memory storage implementation for testing registries
 and other components that depend on storage adapters.
+
+ENHANCED: Now includes compatibility with new MongoDB/Redis storage system
 """
 
 import asyncio
@@ -13,9 +15,7 @@ from datetime import datetime, timezone
 from src.core.interfaces.base import IStorageAdapter, IEntity
 from src.utils.exceptions import StorageError, DataPersistenceError
 
-
 T = TypeVar('T', bound=IEntity)
-
 
 class MockStorageAdapter(IStorageAdapter[T]):
     """
@@ -178,7 +178,6 @@ class MockStorageAdapter(IStorageAdapter[T]):
         if random.random() < self._failure_rate:
             raise StorageError(error_message)
 
-
 class MockEntity(IEntity):
     """
     Mock entity implementation for testing.
@@ -285,7 +284,6 @@ class MockEntity(IEntity):
         """String representation of the entity."""
         return f"MockEntity(id={self._id}, name={self._name}, type={self._entity_type})"
 
-
 class FailingMockStorageAdapter(MockStorageAdapter):
     """
     Mock storage adapter that always fails.
@@ -297,7 +295,6 @@ class FailingMockStorageAdapter(MockStorageAdapter):
         super().__init__("failing_mock")
         self.set_failure_rate(1.0)  # Always fail
         self.set_health_status(False)
-
 
 class SlowMockStorageAdapter(MockStorageAdapter):
     """
@@ -335,13 +332,12 @@ class SlowMockStorageAdapter(MockStorageAdapter):
         await asyncio.sleep(self._connection_delay)
         return await super().query(filters, limit, offset)
 
-
 class InMemoryStorageAdapter(MockStorageAdapter):
     """
-    In-memory storage adapter for testing.
+    In-memory storage adapter for testing and fallback.
     
     Provides fast, reliable in-memory storage without
-    artificial delays or failures.
+    artificial delays or failures. Compatible with new storage system.
     """
     
     def __init__(self):
@@ -349,3 +345,5 @@ class InMemoryStorageAdapter(MockStorageAdapter):
         self.set_health_status(True)
         self.set_failure_rate(0.0)
         self.set_connection_delay(0.0)
+        # Auto-connect for compatibility
+        asyncio.create_task(self.connect())

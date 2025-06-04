@@ -34,7 +34,8 @@ from src.core.interfaces.service import (
     ServiceRequest,
     ServiceResponse
 )
-
+from src.storage import get_twin_storage_adapter, get_global_storage_adapter
+from src.storage.adapters import get_registry_cache, get_session_cache
 # Import storage adapters (mock for now)
 from tests.mocks.storage_adapter import InMemoryStorageAdapter
 
@@ -65,54 +66,78 @@ class ServiceLayerOrchestrator:
     def __init__(self, templates_integration: bool = True):
         self.config = get_config()
         self.templates_integration = templates_integration
-        
-        # Initialize components
         self.factory: Optional[ServiceFactory] = None
         self.registry: Optional[ServiceRegistry] = None
-        
-        # Component state
         self._initialized = False
         self._running = False
         
-        # Service workflow tracking
+        # Service management
         self.active_workflows: Dict[UUID, Dict[str, Any]] = {}
         self.service_dependencies: Dict[UUID, Set[UUID]] = {}
         
-        logger.info("Initialized ServiceLayerOrchestrator")
-    
-    async def initialize(self) -> None:
-        """Initialize all service layer components."""
-        if self._initialized:
-            logger.warning("ServiceLayerOrchestrator already initialized")
-            return
+        # NUEVO: Cache instances
+        self._registry_cache = None
+        self._session_cache = None
         
+        logger.info('Initialized ServiceLayerOrchestrator with enhanced storage')
+        
+    async def initialize(self) -> None:
+        if self._initialized:
+            logger.warning('ServiceLayerOrchestrator already initialized')
+            return
+            
         try:
-            logger.info("Initializing Service Layer components...")
+            logger.info('Initializing Service Layer with MongoDB + Redis...')
             
-            # 1. Initialize Factory
+            # Initialize factory
             self.factory = ServiceFactory()
-            logger.info("Service Factory initialized")
+            logger.info('Service Factory initialized')
             
-            # 2. Initialize Registry with storage adapter
-            storage_adapter = InMemoryStorageAdapter()  # Use proper adapter in production
-            self.registry = ServiceRegistry(storage_adapter)
+            # NUEVO: Use global storage for services (they can be shared across twins)
+            # But we'll create twin-specific adapters when needed
+            storage_adapter = get_global_storage_adapter(IService)
+            
+            # Initialize registry with enhanced caching
+            self.registry = ServiceRegistry(
+                storage_adapter,
+                cache_enabled=True,
+                cache_size=1500,
+                cache_ttl=600
+            )
             await self.registry.connect()
-            logger.info("Service Registry initialized")
+            logger.info('Service Registry initialized with persistent storage')
             
-            # 3. Integrate with ontology system if enabled
+            # NUEVO: Setup caching
+            await self._setup_enhanced_caching()
+            
             if self.templates_integration:
                 await self._integrate_with_templates()
             
-            # 4. Load default service definitions
             await self._load_default_service_definitions()
             
             self._initialized = True
-            logger.info("Service Layer initialized successfully")
+            logger.info('Service Layer initialized successfully')
             
         except Exception as e:
-            logger.error(f"Failed to initialize Service Layer: {e}")
-            raise ServiceConfigurationError(f"Service Layer initialization failed: {e}")
+            logger.error(f'Failed to initialize Service Layer: {e}')
+            raise ServiceConfigurationError(f'Service Layer initialization failed: {e}')
     
+    async def _setup_enhanced_caching(self) -> None:
+        """Setup Redis caching for services."""
+        try:
+            self._registry_cache = await get_registry_cache()
+            self._session_cache = await get_session_cache()
+            
+            # Integrate with registry
+            if hasattr(self.registry, '_setup_redis_cache'):
+                await self.registry._setup_redis_cache(self._registry_cache)
+            
+            logger.info('Service Layer caching setup completed')
+            
+        except Exception as e:
+            logger.warning(f'Failed to setup service caching: {e}')
+
+
     async def start(self) -> None:
         """Start the service layer."""
         if not self._initialized:
@@ -153,69 +178,106 @@ class ServiceLayerOrchestrator:
         except Exception as e:
             logger.error(f"Error stopping Service Layer: {e}")
     
-    async def create_service_from_template(
-        self,
-        template_id: str,
-        digital_twin_id: UUID,
-        instance_name: str,
-        overrides: Optional[Dict[str, Any]] = None
-    ) -> IService:
-        """
-        Create a Service from a template.
-        
-        Args:
-            template_id: ID of the template to use
-            digital_twin_id: ID of the Digital Twin
-            instance_name: Name for the service instance
-            overrides: Optional configuration overrides
-            
-        Returns:
-            Created Service instance
-        """
+    
+    async def create_service_from_template(self, template_id: str, digital_twin_id: UUID, 
+                                         instance_name: str, overrides: Optional[Dict[str, Any]] = None) -> IService:
+        """Create service with twin-specific storage if configured."""
         if not self._initialized:
             await self.initialize()
-        
+            
         try:
-            # Get template from ontology manager
             ontology_manager = get_ontology_manager()
             template = ontology_manager.get_template(template_id)
-            
             if not template or template.template_type != TemplateType.SERVICE:
-                raise ServiceConfigurationError(f"Service template {template_id} not found")
+                raise ServiceConfigurationError(f'Service template {template_id} not found')
             
-            # Apply template with overrides
             config = ontology_manager.apply_template(template_id, overrides)
+            config['digital_twin_id'] = str(digital_twin_id)
+            config['instance_name'] = instance_name
             
-            # Add required fields
-            config["digital_twin_id"] = str(digital_twin_id)
-            config["instance_name"] = instance_name
+            # NUEVO: Setup twin-specific storage if enabled
+            await self._ensure_twin_service_storage(digital_twin_id)
             
-            # Create metadata
             metadata = BaseMetadata(
                 entity_id=uuid4(),
                 timestamp=datetime.now(timezone.utc),
                 version=template.version,
-                created_by=uuid4(),  # Should be actual user ID
+                created_by=uuid4(),
                 custom={
-                    "template_id": template_id,
-                    "template_name": template.name,
-                    "created_from_template": True
+                    'template_id': template_id,
+                    'template_name': template.name,
+                    'created_from_template': True,
+                    'digital_twin_id': str(digital_twin_id)
                 }
             )
             
-            # Create service
             service = await self.factory.create(config, metadata)
             
-            # Register service
-            await self.registry.register_service(service)
+            # Register with associations
+            associations = [ServiceAssociation(
+                service_id=service.id,
+                digital_twin_id=digital_twin_id,
+                association_type='provides_capability'
+            )]
+            await self.registry.register_service(service, associations)
             
-            logger.info(f"Created Service {service.id} from template {template_id}")
+            # NUOVO: Cache the service
+            if self._registry_cache:
+                await self._registry_cache.cache_entity(
+                    service.id, service.to_dict(), 'Service'
+                )
+            
+            logger.info(f'Created Service {service.id} from template {template_id}')
             return service
             
         except Exception as e:
-            logger.error(f"Failed to create service from template {template_id}: {e}")
-            raise EntityCreationError(f"Template-based service creation failed: {e}")
-    
+            logger.error(f'Failed to create service from template {template_id}: {e}')
+            raise EntityCreationError(f'Template-based service creation failed: {e}')
+
+    async def _ensure_twin_service_storage(self, twin_id: UUID) -> None:
+        """Ensure service storage for specific twin."""
+        try:
+            if self.config.get('storage.separate_dbs_per_twin', True):
+                # Test twin-specific storage
+                twin_storage = get_twin_storage_adapter(IService, twin_id)
+                await twin_storage.connect()
+                health = await twin_storage.health_check()
+                
+                if health:
+                    logger.debug(f'Twin service storage ready for {twin_id}')
+                else:
+                    logger.warning(f'Twin service storage health check failed for {twin_id}')
+                    
+        except Exception as e:
+            logger.warning(f'Failed to ensure twin service storage for {twin_id}: {e}')
+
+    async def create_workflow(self, workflow_name: str, service_chain: List[Dict[str, Any]], 
+                            digital_twin_id: UUID, workflow_config: Optional[Dict[str, Any]] = None) -> UUID:
+        """Create workflow with session persistence."""
+        workflow_id = uuid4()
+        workflow = {
+            'workflow_id': workflow_id,
+            'workflow_name': workflow_name,
+            'digital_twin_id': digital_twin_id,
+            'service_chain': service_chain,
+            'workflow_config': workflow_config or {},
+            'created_at': datetime.now(timezone.utc),
+            'status': 'created',
+            'execution_history': []
+        }
+        
+        self.active_workflows[workflow_id] = workflow
+        
+        # NUEVO: Persist in session cache
+        if self._session_cache:
+            await self._session_cache.store_session(
+                f"service_workflow_{workflow_id}",
+                workflow
+            )
+        
+        logger.info(f'Created service workflow {workflow_name} with ID {workflow_id}')
+        return workflow_id
+
     async def create_service_from_definition(
         self,
         definition_id: str,
@@ -556,44 +618,45 @@ class ServiceLayerOrchestrator:
         
         return templates
     
+    
     async def get_layer_statistics(self) -> Dict[str, Any]:
-        """Get comprehensive statistics for the service layer."""
+        """Enhanced statistics with storage health."""
         if not self._initialized:
             await self.initialize()
-        
-        # Registry statistics
+            
         registry_stats = await self.registry.get_service_statistics()
-        
-        # Factory statistics
         factory_stats = {
-            "supported_service_types": len(self.factory.get_available_service_types()),
-            "available_definitions": len(self.factory._service_definitions)
+            'supported_service_types': len(self.factory.get_available_service_types()),
+            'available_definitions': len(self.factory._service_definitions)
         }
         
-        # Workflow statistics
         workflow_stats = {
-            "active_workflows": len(self.active_workflows),
-            "workflows_by_status": {},
-            "total_service_dependencies": len(self.service_dependencies)
+            'active_workflows': len(self.active_workflows),
+            'workflows_by_status': {},
+            'total_service_dependencies': len(self.service_dependencies)
         }
         
         for workflow in self.active_workflows.values():
-            status = workflow["status"]
-            workflow_stats["workflows_by_status"][status] = workflow_stats["workflows_by_status"].get(status, 0) + 1
+            status = workflow['status']
+            workflow_stats['workflows_by_status'][status] = workflow_stats['workflows_by_status'].get(status, 0) + 1
+        
+        # NUOVO: Storage health
+        storage_health = await self._get_storage_health()
         
         return {
-            "service_layer": {
-                "initialized": self._initialized,
-                "running": self._running,
-                "templates_integration": self.templates_integration,
-                "components": {
-                    "factory": bool(self.factory),
-                    "registry": bool(self.registry)
+            'service_layer': {
+                'initialized': self._initialized,
+                'running': self._running,
+                'templates_integration': self.templates_integration,
+                'components': {
+                    'factory': bool(self.factory),
+                    'registry': bool(self.registry)
                 }
             },
-            "registry": registry_stats,
-            "factory": factory_stats,
-            "workflows": workflow_stats
+            'registry': registry_stats,
+            'factory': factory_stats,
+            'workflows': workflow_stats,
+            'storage': storage_health  # NUOVO
         }
     
     # Private helper methods
@@ -606,6 +669,34 @@ class ServiceLayerOrchestrator:
             logger.warning(f"Failed to integrate with template system: {e}")
             self.templates_integration = False
     
+    async def _get_storage_health(self) -> Dict[str, Any]:
+        """Get service storage health."""
+        health = {
+            'primary_storage': 'unknown',
+            'cache_storage': 'unknown',
+            'registry_connected': False,
+            'cache_connected': False
+        }
+        
+        try:
+            # Registry storage
+            if self.registry and hasattr(self.registry, 'storage_adapter'):
+                registry_health = await self.registry.storage_adapter.health_check()
+                health['registry_connected'] = registry_health
+                health['primary_storage'] = 'mongodb' if registry_health else 'failed'
+            
+            # Cache
+            if self._registry_cache:
+                cache_health = await self._registry_cache.cache.health_check()
+                health['cache_connected'] = cache_health
+                health['cache_storage'] = 'redis' if cache_health else 'failed'
+            
+        except Exception as e:
+            logger.warning(f'Service storage health check error: {e}')
+            health['error'] = str(e)
+        
+        return health
+
     async def _load_default_service_definitions(self) -> None:
         """Load default service definitions."""
         if not self.factory or not self.registry:

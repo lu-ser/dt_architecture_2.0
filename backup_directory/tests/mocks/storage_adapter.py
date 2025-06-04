@@ -216,3 +216,4 @@ class InMemoryStorageAdapter(MockStorageAdapter):
         self.set_health_status(True)
         self.set_failure_rate(0.0)
         self.set_connection_delay(0.0)
+        asyncio.create_task(self.connect())

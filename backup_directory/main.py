@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class SimpleConfig:
 
     def __init__(self):
-        self.data = {'environment': os.getenv('DT_ENVIRONMENT', 'development'), 'debug': os.getenv('DT_DEBUG', 'true').lower() == 'true', 'version': '1.0.0', 'service_name': 'digital-twin-platform', 'logging': {'level': os.getenv('DT_LOG_LEVEL', 'INFO'), 'file_path': os.getenv('DT_LOG_FILE', 'logs/platform.log')}, 'api': {'host': os.getenv('DT_API_HOST', '0.0.0.0'), 'port': int(os.getenv('DT_API_PORT', '8000')), 'cors_origins': ['*'], 'allowed_hosts': ['*']}, 'auth': {'secret_key': os.getenv('DT_AUTH_SECRET', 'dev-secret-key-change-in-production'), 'algorithm': 'HS256', 'access_token_expire_minutes': 60, 'refresh_token_expire_days': 7}, 'database': {'host': os.getenv('DT_DB_HOST', 'localhost'), 'port': int(os.getenv('DT_DB_PORT', '5432')), 'database': os.getenv('DT_DB_NAME', 'digital_twin_platform'), 'username': os.getenv('DT_DB_USER', 'dt_user'), 'password': os.getenv('DT_DB_PASSWORD', '')}, 'redis': {'host': os.getenv('DT_REDIS_HOST', 'localhost'), 'port': int(os.getenv('DT_REDIS_PORT', '6379')), 'database': int(os.getenv('DT_REDIS_DB', '0')), 'password': os.getenv('DT_REDIS_PASSWORD')}}
+        self.data = {'environment': os.getenv('DT_ENVIRONMENT', 'development'), 'debug': os.getenv('DT_DEBUG', 'true').lower() == 'true', 'version': '1.0.0', 'service_name': 'digital-twin-platform', 'logging': {'level': os.getenv('DT_LOG_LEVEL', 'INFO'), 'file_path': os.getenv('DT_LOG_FILE', 'logs/platform.log')}, 'api': {'host': os.getenv('DT_API_HOST', '0.0.0.0'), 'port': int(os.getenv('DT_API_PORT', '8000')), 'cors_origins': ['*'], 'allowed_hosts': ['*']}, 'auth': {'secret_key': os.getenv('DT_AUTH_SECRET', 'dev-secret-key-change-in-production'), 'algorithm': 'HS256', 'access_token_expire_minutes': 60, 'refresh_token_expire_days': 7}, 'mongodb': {'connection_string': os.getenv('DT_MONGO_URI', 'mongodb://localhost:27017'), 'database_prefix': os.getenv('DT_MONGO_DB_PREFIX', 'dt_platform'), 'global_database': os.getenv('DT_MONGO_GLOBAL_DB', 'dt_platform_global'), 'pool_size': int(os.getenv('DT_MONGO_POOL_SIZE', '10')), 'max_pool_size': int(os.getenv('DT_MONGO_MAX_POOL', '50')), 'timeout_ms': int(os.getenv('DT_MONGO_TIMEOUT', '5000')), 'username': os.getenv('DT_MONGO_USER'), 'password': os.getenv('DT_MONGO_PASSWORD')}, 'redis': {'host': os.getenv('DT_REDIS_HOST', 'localhost'), 'port': int(os.getenv('DT_REDIS_PORT', '6379')), 'database': int(os.getenv('DT_REDIS_DB', '0')), 'password': os.getenv('DT_REDIS_PASSWORD'), 'max_connections': int(os.getenv('DT_REDIS_MAX_CONN', '20')), 'connection_timeout': int(os.getenv('DT_REDIS_TIMEOUT', '5'))}, 'storage': {'primary_type': os.getenv('DT_STORAGE_PRIMARY', 'mongodb'), 'cache_type': os.getenv('DT_STORAGE_CACHE', 'redis'), 'separate_dbs_per_twin': os.getenv('DT_SEPARATE_DBS', 'true').lower() == 'true'}, 'database': {'host': os.getenv('DT_DB_HOST', 'localhost'), 'port': int(os.getenv('DT_DB_PORT', '5432')), 'database': os.getenv('DT_DB_NAME', 'digital_twin_platform'), 'username': os.getenv('DT_DB_USER', 'dt_user'), 'password': os.getenv('DT_DB_PASSWORD', '')}, 'jwt': {'secret_key': os.getenv('DT_AUTH_SECRET', 'dev-secret-key-change-in-production')}}
 
     def get(self, key, default=None):
         keys = key.split('.')
@@ -43,12 +43,15 @@ class DigitalTwinPlatform:
         self.api_gateway = None
         self.running = False
         self._shutdown_event = asyncio.Event()
+        self._storage_initialized = False
+        self._storage_status = {}
 
     async def initialize(self) -> None:
         try:
             logger.info('Starting Digital Twin Platform initialization...')
             self._setup_logging()
             self._patch_module_configs()
+            await self._initialize_storage()
             await self._initialize_layers()
             await self._initialize_api_gateway()
             logger.info('Digital Twin Platform initialized successfully')
@@ -56,6 +59,33 @@ class DigitalTwinPlatform:
             logger.error(f'Failed to initialize Digital Twin Platform: {e}')
             logger.exception('Full traceback:')
             raise RuntimeError(f'Platform initialization failed: {e}')
+
+    async def _initialize_storage(self) -> None:
+        try:
+            logger.info('Initializing storage infrastructure...')
+            from src.storage import initialize_storage
+            self._storage_status = await initialize_storage()
+            self._storage_initialized = True
+            primary = self._storage_status.get('primary_storage', 'unknown')
+            cache = self._storage_status.get('cache_storage', 'none')
+            separate_dbs = self._storage_status.get('separate_dbs_per_twin', False)
+            logger.info(f'Storage initialized: {primary} + {cache}')
+            if separate_dbs:
+                logger.info('Using separate databases per Digital Twin (migration ready)')
+            connections = self._storage_status.get('connections', {})
+            for conn_name, conn_info in connections.items():
+                if isinstance(conn_info, dict) and conn_info.get('connected'):
+                    logger.info(f'  ✓ {conn_name} connected')
+                elif 'error' in str(conn_info):
+                    logger.warning(f'  ✗ {conn_name} failed: {conn_info}')
+        except ImportError as e:
+            logger.warning(f'Storage modules not available: {e}')
+            logger.info('Falling back to in-memory storage')
+            self._storage_status = {'primary_storage': 'memory', 'cache_storage': 'none', 'fallback_reason': str(e)}
+        except Exception as e:
+            logger.error(f'Storage initialization failed: {e}')
+            logger.info('Falling back to in-memory storage')
+            self._storage_status = {'primary_storage': 'memory', 'cache_storage': 'none', 'fallback_reason': str(e)}
 
     async def start(self) -> None:
         if self.running:
@@ -212,6 +242,12 @@ class DigitalTwinPlatform:
                         svc_stats = overview['layer_statistics']['service']['service_layer']
                         svc_running = svc_stats['running']
                         logger.info(f"   Service Layer: {('Running' if svc_running else 'Stopped')}")
+                if 'storage_health' in overview:
+                    storage = overview['storage_health']
+                    primary_status = 'Connected' if storage.get('twin_registry_connected') else 'Failed'
+                    logger.info(f"   Storage: {primary_status} ({storage.get('primary_storage', 'unknown')})")
+                    if storage.get('cache_connected'):
+                        logger.info(f"   Cache: Connected ({storage.get('cache_storage', 'unknown')})")
                 health = overview['platform_health']['all_layers_running']
                 logger.info(f"   Platform Health: {('Healthy' if health else 'Degraded')}")
         except Exception as e:
@@ -235,6 +271,10 @@ async def main():
         logger.info(f'Digital Twin Platform ready! API available at http://{host}:{port}')
         logger.info(f'API Documentation: http://{host}:{port}/docs')
         logger.info(f'Health Check: http://{host}:{port}/health')
+        if platform._storage_status:
+            primary = platform._storage_status.get('primary_storage', 'unknown')
+            cache = platform._storage_status.get('cache_storage', 'none')
+            logger.info(f'Storage: {primary} + {cache}')
         await platform.start_api_server(host=host, port=port)
     except KeyboardInterrupt:
         logger.info('Received shutdown signal')
@@ -267,5 +307,7 @@ if __name__ == '__main__':
     print(f"   DT_API_HOST: {os.getenv('DT_API_HOST', '0.0.0.0')}")
     print(f"   DT_API_PORT: {os.getenv('DT_API_PORT', '8000')}")
     print(f"   DT_LOG_LEVEL: {os.getenv('DT_LOG_LEVEL', 'INFO')}")
+    print(f"   DT_STORAGE_PRIMARY: {os.getenv('DT_STORAGE_PRIMARY', 'mongodb')}")
+    print(f"   DT_STORAGE_CACHE: {os.getenv('DT_STORAGE_CACHE', 'redis')}")
     print('=' * 50)
     sync_main()

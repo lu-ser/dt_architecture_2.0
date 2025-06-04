@@ -13,6 +13,8 @@ from src.core.interfaces.service import IService, ServiceType, ServiceRequest
 from src.layers.virtualization import get_virtualization_orchestrator
 from src.layers.service import get_service_orchestrator
 from tests.mocks.storage_adapter import InMemoryStorageAdapter
+from src.storage import get_global_storage_adapter, get_twin_storage_adapter
+from src.storage.adapters import get_registry_cache, get_session_cache
 from src.layers.virtualization.ontology.manager import get_ontology_manager, TemplateType
 from src.utils.exceptions import DigitalTwinError, DigitalTwinNotFoundError, EntityCreationError, ConfigurationError
 from src.utils.config import get_config
@@ -34,30 +36,43 @@ class DigitalTwinLayerOrchestrator:
         self.service_bindings: Dict[UUID, Set[UUID]] = {}
         self.active_workflows: Dict[UUID, Dict[str, Any]] = {}
         self.cross_twin_operations: Dict[UUID, Dict[str, Any]] = {}
-        logger.info('Initialized DigitalTwinLayerOrchestrator')
+        self._registry_cache = None
+        self._session_cache = None
+        logger.info('Initialized DigitalTwinLayerOrchestrator with enhanced storage')
 
     async def initialize(self) -> None:
         if self._initialized:
             logger.warning('DigitalTwinLayerOrchestrator already initialized')
             return
         try:
-            logger.info('Initializing Digital Twin Layer...')
+            logger.info('Initializing Digital Twin Layer with MongoDB + Redis...')
             self.factory = DigitalTwinFactory()
             logger.info('Digital Twin Factory initialized')
-            storage_adapter = InMemoryStorageAdapter()
-            self.registry = EnhancedDigitalTwinRegistry(storage_adapter)
+            storage_adapter = get_global_storage_adapter(IDigitalTwin)
+            self.registry = EnhancedDigitalTwinRegistry(storage_adapter, cache_enabled=True, cache_size=1000, cache_ttl=600)
             await self.registry.connect()
             logger.info('Enhanced Digital Twin Registry initialized')
+            await self._setup_enhanced_caching()
             await self._integrate_with_virtualization_layer()
             await self._integrate_with_service_layer()
             if self.templates_integration:
                 await self._integrate_with_templates()
             await self._setup_data_flow_coordination()
             self._initialized = True
-            logger.info('Digital Twin Layer initialized successfully')
+            logger.info('Digital Twin Layer initialized successfully with persistent storage')
         except Exception as e:
             logger.error(f'Failed to initialize Digital Twin Layer: {e}')
             raise ConfigurationError(f'Digital Twin Layer initialization failed: {e}')
+
+    async def _setup_enhanced_caching(self) -> None:
+        try:
+            self._registry_cache = await get_registry_cache()
+            self._session_cache = await get_session_cache()
+            if hasattr(self.registry, '_setup_redis_cache'):
+                await self.registry._setup_redis_cache(self._registry_cache)
+            logger.info('Enhanced caching setup completed for Digital Twin Layer')
+        except Exception as e:
+            logger.warning(f'Failed to setup enhanced caching: {e}')
 
     async def start(self) -> None:
         if not self._initialized:
@@ -98,17 +113,33 @@ class DigitalTwinLayerOrchestrator:
                 twin = await self._create_from_template(template_id, customization or {}, name, description)
             else:
                 twin = await self._create_from_configuration(twin_type, name, description, capabilities, customization or {})
+            await self._setup_twin_storage(twin.id)
             associations = []
             await self.registry.register_digital_twin_enhanced(twin, associations, parent_twin_id)
             await self._setup_twin_integrations(twin)
+            if self._registry_cache:
+                await self._registry_cache.cache_entity(twin.id, twin.to_dict(), 'DigitalTwin')
             self.active_twins[twin.id] = twin
             await twin.initialize()
             await twin.start()
-            logger.info(f'Created and orchestrated Digital Twin {twin.id} ({name})')
+            logger.info(f'Created and orchestrated Digital Twin {twin.id} ({name}) with persistent storage')
             return twin
         except Exception as e:
             logger.error(f'Failed to create Digital Twin: {e}')
             raise EntityCreationError(f'Digital Twin creation failed: {e}')
+
+    async def _setup_twin_storage(self, twin_id: UUID) -> None:
+        try:
+            if self.config.get('storage.separate_dbs_per_twin', True):
+                from src.core.interfaces.replica import IDigitalReplica
+                from src.core.interfaces.service import IService
+                replica_storage = get_twin_storage_adapter(IDigitalReplica, twin_id)
+                await replica_storage.connect()
+                service_storage = get_twin_storage_adapter(IService, twin_id)
+                await service_storage.connect()
+                logger.info(f'Twin-specific storage infrastructure ready for {twin_id}')
+        except Exception as e:
+            logger.warning(f'Failed to setup twin storage for {twin_id}: {e}')
 
     async def associate_replica_with_twin(self, twin_id: UUID, replica_id: UUID, data_mapping: Optional[Dict[str, str]]=None) -> None:
         try:
@@ -119,6 +150,8 @@ class DigitalTwinLayerOrchestrator:
             if twin_id not in self.data_flow_subscriptions:
                 self.data_flow_subscriptions[twin_id] = set()
             self.data_flow_subscriptions[twin_id].add(replica_id)
+            if self._registry_cache:
+                await self._registry_cache.invalidate_entity(twin_id, 'DigitalTwin')
             if self.virtualization_orchestrator:
                 await self._configure_data_routing(twin_id, replica_id)
             logger.info(f'Associated replica {replica_id} with Digital Twin {twin_id}')
@@ -160,6 +193,8 @@ class DigitalTwinLayerOrchestrator:
         workflow_id = uuid4()
         workflow = {'workflow_id': workflow_id, 'workflow_name': workflow_name, 'twin_operations': twin_operations, 'workflow_config': workflow_config, 'created_at': datetime.now(timezone.utc), 'status': 'created', 'execution_history': []}
         self.active_workflows[workflow_id] = workflow
+        if self._session_cache:
+            await self._session_cache.store_session(f'workflow_{workflow_id}', workflow)
         logger.info(f'Created cross-twin workflow {workflow_name} with ID {workflow_id}')
         return workflow_id
 
@@ -235,7 +270,39 @@ class DigitalTwinLayerOrchestrator:
         if self.service_orchestrator:
             layer_stats['service'] = await self.service_orchestrator.get_layer_statistics()
         orchestration_stats = {'active_twins': len(self.active_twins), 'data_flow_subscriptions': len(self.data_flow_subscriptions), 'service_bindings': len(self.service_bindings), 'active_workflows': len(self.active_workflows), 'cross_twin_operations': len(self.cross_twin_operations)}
-        return {'digital_twin_layer': {'initialized': self._initialized, 'running': self._running, 'orchestration': orchestration_stats}, 'registry_analytics': registry_analytics, 'layer_statistics': layer_stats, 'platform_health': {'all_layers_running': all([self._running, self.virtualization_orchestrator is not None, self.service_orchestrator is not None]), 'timestamp': datetime.now(timezone.utc).isoformat()}}
+        storage_health = await self._get_storage_health()
+        return {'digital_twin_layer': {'initialized': self._initialized, 'running': self._running, 'orchestration': orchestration_stats}, 'registry_analytics': registry_analytics, 'layer_statistics': layer_stats, 'storage_health': storage_health, 'platform_health': {'all_layers_running': all([self._running, self.virtualization_orchestrator is not None, self.service_orchestrator is not None]), 'timestamp': datetime.now(timezone.utc).isoformat()}}
+
+    async def _get_storage_health(self) -> Dict[str, Any]:
+        health = {'primary_storage': 'unknown', 'cache_storage': 'unknown', 'twin_registry_connected': False, 'cache_connected': False, 'separate_twin_dbs': self.config.get('storage.separate_dbs_per_twin', False)}
+        try:
+            if self.registry and hasattr(self.registry, 'storage_adapter'):
+                registry_health = await self.registry.storage_adapter.health_check()
+                health['twin_registry_connected'] = registry_health
+                health['primary_storage'] = 'mongodb' if registry_health else 'failed'
+            if self._registry_cache:
+                cache_health = await self._registry_cache.cache.health_check()
+                health['cache_connected'] = cache_health
+                health['cache_storage'] = 'redis' if cache_health else 'failed'
+            if health['separate_twin_dbs'] and self.active_twins:
+                test_count = 0
+                success_count = 0
+                for twin_id in list(self.active_twins.keys())[:3]:
+                    test_count += 1
+                    try:
+                        from src.core.interfaces.replica import IDigitalReplica
+                        twin_storage = get_twin_storage_adapter(IDigitalReplica, twin_id)
+                        twin_health = await twin_storage.health_check()
+                        if twin_health:
+                            success_count += 1
+                    except Exception:
+                        pass
+                health['twin_specific_dbs_tested'] = test_count
+                health['twin_specific_dbs_healthy'] = success_count
+        except Exception as e:
+            logger.warning(f'Storage health check error: {e}')
+            health['error'] = str(e)
+        return health
 
     async def _integrate_with_virtualization_layer(self) -> None:
         try:
