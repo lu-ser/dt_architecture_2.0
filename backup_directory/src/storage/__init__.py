@@ -4,8 +4,6 @@ from uuid import UUID
 from src.core.interfaces.base import IStorageAdapter, IEntity
 from src.utils.config import get_config
 from src.utils.exceptions import ConfigurationError
-from .adapters.mongodb_adapter import MongoStorageAdapterFactory
-from tests.mocks.storage_adapter import InMemoryStorageAdapter
 T = TypeVar('T', bound=IEntity)
 logger = logging.getLogger(__name__)
 
@@ -17,16 +15,24 @@ class StorageFactory:
         storage_type = config.get('storage.primary_type', 'memory')
         try:
             if storage_type == 'mongodb':
+                from .adapters.mongodb_adapter import MongoStorageAdapterFactory
                 return MongoStorageAdapterFactory.create_adapter(entity_type, twin_id)
             elif storage_type == 'memory':
-                return InMemoryStorageAdapter[T]()
+                from tests.mocks.storage_adapter import InMemoryStorageAdapter
+                return InMemoryStorageAdapter(entity_type)
             else:
                 logger.warning(f"Unknown storage type '{storage_type}', falling back to memory")
-                return InMemoryStorageAdapter[T]()
+                from tests.mocks.storage_adapter import InMemoryStorageAdapter
+                return InMemoryStorageAdapter(entity_type)
         except Exception as e:
             logger.error(f'Failed to create {storage_type} adapter: {e}')
             logger.warning('Falling back to in-memory storage')
-            return InMemoryStorageAdapter[T]()
+            try:
+                from tests.mocks.storage_adapter import InMemoryStorageAdapter
+                return InMemoryStorageAdapter(entity_type)
+            except Exception as fallback_error:
+                logger.error(f'Fallback to memory storage failed: {fallback_error}')
+                raise ConfigurationError(f'Unable to create storage adapter: {fallback_error}')
 
     @staticmethod
     def create_global_adapter(entity_type: Type[T]) -> IStorageAdapter[T]:

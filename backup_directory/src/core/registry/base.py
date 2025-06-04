@@ -100,7 +100,11 @@ class AbstractRegistry(IRegistry[T], ABC):
         self.config = get_config()
         self.logger = logging.getLogger(f'{__name__}.{self.__class__.__name__}')
         self._connected = False
-        self._connection_lock = asyncio.Lock()
+        try:
+            import asyncio
+            self._connection_lock = asyncio.Lock()
+        except:
+            self._connection_lock = None
 
     @property
     def registry_name(self) -> str:
@@ -108,36 +112,56 @@ class AbstractRegistry(IRegistry[T], ABC):
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return getattr(self, '_connected', False)
 
     async def connect(self) -> None:
-        async with self._connection_lock:
-            if not self._connected:
-                try:
-                    await self.storage_adapter.connect()
-                    self._connected = True
-                    self.logger.info(f'{self.registry_name} connected to storage')
-                except Exception as e:
-                    self.logger.error(f'Failed to connect {self.registry_name}: {e}')
-                    raise RegistryConnectionError(f'Connection failed: {e}')
+        if hasattr(self, '_connection_lock'):
+            async with self._connection_lock:
+                if not getattr(self, '_connected', False):
+                    try:
+                        await self.storage_adapter.connect()
+                        self._connected = True
+                        self.logger.info(f'{self.registry_name} connected to storage')
+                    except Exception as e:
+                        self.logger.error(f'Failed to connect {self.registry_name}: {e}')
+                        from src.utils.exceptions import RegistryConnectionError
+                        raise RegistryConnectionError(f'Connection failed: {e}')
+        else:
+            try:
+                await self.storage_adapter.connect()
+                self._connected = True
+                self.logger.info(f'{self.registry_name} connected to storage')
+            except Exception as e:
+                self.logger.error(f'Failed to connect {self.registry_name}: {e}')
+                from src.utils.exceptions import RegistryConnectionError
+                raise RegistryConnectionError(f'Connection failed: {e}')
 
     async def disconnect(self) -> None:
-        async with self._connection_lock:
-            if self._connected:
-                try:
-                    await self.storage_adapter.disconnect()
-                    self._connected = False
-                    self.logger.info(f'{self.registry_name} disconnected from storage')
-                except Exception as e:
-                    self.logger.error(f'Failed to disconnect {self.registry_name}: {e}')
+        if hasattr(self, '_connection_lock'):
+            async with self._connection_lock:
+                if getattr(self, '_connected', False):
+                    try:
+                        await self.storage_adapter.disconnect()
+                        self._connected = False
+                        self.logger.info(f'{self.registry_name} disconnected from storage')
+                    except Exception as e:
+                        self.logger.error(f'Failed to disconnect {self.registry_name}: {e}')
+        else:
+            try:
+                await self.storage_adapter.disconnect()
+                self._connected = False
+                self.logger.info(f'{self.registry_name} disconnected from storage')
+            except Exception as e:
+                self.logger.error(f'Failed to disconnect {self.registry_name}: {e}')
 
     async def register(self, entity: T) -> None:
         start_time = datetime.now(timezone.utc)
         try:
             await self._ensure_connected()
-            if not entity.validate():
+            if hasattr(entity, 'validate') and (not entity.validate()):
                 raise RegistryError(f'Entity validation failed for {entity.id}')
             if await self.exists(entity.id):
+                from src.utils.exceptions import EntityAlreadyExistsError
                 raise EntityAlreadyExistsError(entity_type=self.entity_type.__name__, entity_id=str(entity.id))
             await self._pre_register_hook(entity)
             await self.storage_adapter.save(entity)
@@ -160,6 +184,7 @@ class AbstractRegistry(IRegistry[T], ABC):
         try:
             await self._ensure_connected()
             if not await self.exists(entity_id):
+                from src.utils.exceptions import EntityNotFoundError
                 raise EntityNotFoundError(entity_type=self.entity_type.__name__, entity_id=str(entity_id))
             entity = await self.get(entity_id)
             await self._pre_unregister_hook(entity)
@@ -199,6 +224,7 @@ class AbstractRegistry(IRegistry[T], ABC):
         except Exception as e:
             response_time = (datetime.now(timezone.utc) - start_time).total_seconds()
             self.metrics.record_operation(False, response_time)
+            from src.utils.exceptions import StorageError, EntityNotFoundError
             if isinstance(e, StorageError):
                 raise EntityNotFoundError(entity_type=self.entity_type.__name__, entity_id=str(entity_id))
             raise
@@ -224,16 +250,17 @@ class AbstractRegistry(IRegistry[T], ABC):
         try:
             await self.get(entity_id)
             return True
-        except EntityNotFoundError:
+        except:
             return False
 
     async def update(self, entity: T) -> None:
         start_time = datetime.now(timezone.utc)
         try:
             await self._ensure_connected()
-            if not entity.validate():
+            if hasattr(entity, 'validate') and (not entity.validate()):
                 raise RegistryError(f'Entity validation failed for {entity.id}')
             if not await self.exists(entity.id):
+                from src.utils.exceptions import EntityNotFoundError
                 raise EntityNotFoundError(entity_type=self.entity_type.__name__, entity_id=str(entity.id))
             await self._pre_update_hook(entity)
             await self.storage_adapter.save(entity)
@@ -298,7 +325,7 @@ class AbstractRegistry(IRegistry[T], ABC):
         pass
 
     async def _ensure_connected(self) -> None:
-        if not self._connected:
+        if not getattr(self, '_connected', False):
             await self.connect()
 
     def __repr__(self) -> str:

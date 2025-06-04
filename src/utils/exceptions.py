@@ -285,3 +285,7 @@ class PermissionValidationError(ValidationError):
 class APIGatewayError(DigitalTwinPlatformError):
     """Base exception for API Gateway-related errors."""
     pass
+
+class DeserializationError(Exception):
+    """Raised when entity deserialization from storage fails"""
+    pass

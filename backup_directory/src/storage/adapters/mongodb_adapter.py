@@ -7,6 +7,7 @@ import json
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
 from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure, DuplicateKeyError
 from bson import ObjectId
+from src.utils.entity_wrapper import DictToObjectWrapper
 from src.core.interfaces.base import IStorageAdapter, IEntity, BaseMetadata
 from src.utils.exceptions import StorageError, StorageConnectionError, DataPersistenceError, EntityNotFoundError
 from src.utils.config import get_config
@@ -81,6 +82,10 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
         self._database_name = self._get_database_name()
         self._collection_name = self._get_collection_name()
         logger.info(f'MongoDB adapter initialized for {entity_type.__name__} (DB: {self._database_name})')
+
+    @property
+    def storage_type(self) -> str:
+        return 'mongodb'
 
     def _get_database_name(self) -> str:
         prefix = self.config.get('mongodb.database_prefix', 'dt_platform')
@@ -168,8 +173,9 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             if not document:
                 raise EntityNotFoundError(self.entity_type.__name__, str(entity_id))
             entity_dict = EntitySerializer.document_to_entity_dict(document, self.entity_type)
+            entity_wrapper = DictToObjectWrapper(entity_dict)
             logger.debug(f'Loaded entity {entity_id} from {self._collection_name}')
-            return entity_dict
+            return entity_wrapper
         except EntityNotFoundError:
             raise
         except Exception as e:
@@ -204,7 +210,8 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             entities = []
             for doc in documents:
                 entity_dict = EntitySerializer.document_to_entity_dict(doc, self.entity_type)
-                entities.append(entity_dict)
+                entity_wrapper = DictToObjectWrapper(entity_dict)
+                entities.append(entity_wrapper)
             logger.debug(f'Queried {len(entities)} entities from {self._collection_name}')
             return entities
         except Exception as e:

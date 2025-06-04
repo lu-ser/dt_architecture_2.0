@@ -176,3 +176,6 @@ class PermissionValidationError(ValidationError):
 
 class APIGatewayError(DigitalTwinPlatformError):
     pass
+
+class DeserializationError(Exception):
+    pass

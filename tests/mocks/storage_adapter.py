@@ -8,7 +8,7 @@ ENHANCED: Now includes compatibility with new MongoDB/Redis storage system
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional, TypeVar
+from typing import Any, Dict, List, Optional, TypeVar, Generic
 from uuid import UUID
 from datetime import datetime, timezone
 
@@ -17,7 +17,7 @@ from src.utils.exceptions import StorageError, DataPersistenceError
 
 T = TypeVar('T', bound=IEntity)
 
-class MockStorageAdapter(IStorageAdapter[T]):
+class MockStorageAdapter(IStorageAdapter[T], Generic[T]):
     """
     Mock storage adapter for testing.
     
@@ -35,8 +35,7 @@ class MockStorageAdapter(IStorageAdapter[T]):
         self._operation_count = 0
     
     @property
-    def storage_type(self) -> str:
-        """Get the type of storage this adapter handles."""
+    def storage_type(self) -> str: 
         return self._storage_type
     
     def set_connection_delay(self, delay: float) -> None:

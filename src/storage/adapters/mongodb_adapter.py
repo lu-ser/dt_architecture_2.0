@@ -8,6 +8,7 @@ import json
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
 from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure, DuplicateKeyError
 from bson import ObjectId
+from src.utils.entity_wrapper import DictToObjectWrapper
 
 from src.core.interfaces.base import IStorageAdapter, IEntity, BaseMetadata
 from src.utils.exceptions import StorageError, StorageConnectionError, DataPersistenceError, EntityNotFoundError
@@ -116,7 +117,10 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
         self._collection_name = self._get_collection_name()
         
         logger.info(f"MongoDB adapter initialized for {entity_type.__name__} (DB: {self._database_name})")
-    
+    @property
+    def storage_type(self) -> str:
+        """Return the storage type identifier"""
+        return "mongodb"
     def _get_database_name(self) -> str:
         """Get database name based on entity type and twin_id."""
         prefix = self.config.get('mongodb.database_prefix', 'dt_platform')
@@ -255,29 +259,26 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             raise DataPersistenceError(f"Save operation failed: {e}")
     
     async def load(self, entity_id: UUID) -> T:
-        """Load entity from MongoDB by ID."""
         if not self._connected:
             await self.connect()
-        
         try:
-            document = await self._collection.find_one({"entity_id": str(entity_id)})
-            
+            document = await self._collection.find_one({'entity_id': str(entity_id)})
             if not document:
                 raise EntityNotFoundError(self.entity_type.__name__, str(entity_id))
             
-            # Convert document back to entity dict
             entity_dict = EntitySerializer.document_to_entity_dict(document, self.entity_type)
             
-            # This is a simplified approach - in practice you'd need entity factories
-            # For now, return the dict and let the registry handle entity reconstruction
-            logger.debug(f"Loaded entity {entity_id} from {self._collection_name}")
-            return entity_dict  # Registry will convert this back to entity
+            # AGGIUNTO: Converte il dizionario in un oggetto
+            entity_wrapper = DictToObjectWrapper(entity_dict)
             
+            logger.debug(f'Loaded entity {entity_id} from {self._collection_name}')
+            return entity_wrapper
         except EntityNotFoundError:
             raise
         except Exception as e:
-            logger.error(f"Failed to load entity {entity_id}: {e}")
-            raise StorageError(f"Load operation failed: {e}")
+            logger.error(f'Failed to load entity {entity_id}: {e}')
+            raise StorageError(f'Load operation failed: {e}')
+    
     
     async def delete(self, entity_id: UUID) -> None:
         """Delete entity from MongoDB."""
@@ -298,39 +299,31 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             logger.error(f"Failed to delete entity {entity_id}: {e}")
             raise StorageError(f"Delete operation failed: {e}")
     
-    async def query(self, filters: Dict[str, Any], limit: Optional[int] = None, offset: Optional[int] = None) -> List[T]:
-        """Query entities from MongoDB with filters."""
+    async def query(self, filters: Dict[str, Any], limit: Optional[int]=None, offset: Optional[int]=None) -> List[T]:
         if not self._connected:
             await self.connect()
-        
         try:
-            # Convert filters to MongoDB query
             mongo_filter = self._build_mongo_filter(filters)
-            
-            # Build cursor
             cursor = self._collection.find(mongo_filter)
-            
-            # Apply pagination
             if offset:
                 cursor = cursor.skip(offset)
             if limit:
                 cursor = cursor.limit(limit)
-            
-            # Execute query
             documents = await cursor.to_list(length=limit)
             
-            # Convert documents to entity dicts
             entities = []
             for doc in documents:
                 entity_dict = EntitySerializer.document_to_entity_dict(doc, self.entity_type)
-                entities.append(entity_dict)
-            
-            logger.debug(f"Queried {len(entities)} entities from {self._collection_name}")
+                
+                # AGGIUNTO: Converte il dizionario in un oggetto
+                entity_wrapper = DictToObjectWrapper(entity_dict)
+                entities.append(entity_wrapper)
+                        
+            logger.debug(f'Queried {len(entities)} entities from {self._collection_name}')
             return entities
-            
         except Exception as e:
-            logger.error(f"Failed to query entities: {e}")
-            raise StorageError(f"Query operation failed: {e}")
+            logger.error(f'Failed to query entities: {e}')
+            raise StorageError(f'Query operation failed: {e}')
     
     def _build_mongo_filter(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Convert generic filters to MongoDB query."""
@@ -378,3 +371,4 @@ class MongoStorageAdapterFactory:
     def create_twin_adapter(entity_type: Type[T], twin_id: UUID) -> MongoStorageAdapter[T]:
         """Create adapter for twin-specific entities (replicas, services)."""
         return MongoStorageAdapter(entity_type, twin_id=twin_id)
+    

@@ -1,12 +1,12 @@
 import asyncio
-from typing import Any, Dict, List, Optional, TypeVar
+from typing import Any, Dict, List, Optional, TypeVar, Generic
 from uuid import UUID
 from datetime import datetime, timezone
 from src.core.interfaces.base import IStorageAdapter, IEntity
 from src.utils.exceptions import StorageError, DataPersistenceError
 T = TypeVar('T', bound=IEntity)
 
-class MockStorageAdapter(IStorageAdapter[T]):
+class MockStorageAdapter(IStorageAdapter[T], Generic[T]):
 
     def __init__(self, storage_type: str='mock'):
         self._storage_type = storage_type
