@@ -189,27 +189,45 @@ get_gateway = get_gateway_dependency()
 
 
 def register_routers(app: FastAPI) -> None:
-    """Register all API routers with the FastAPI app."""
+    """Register routers one by one to identify the problematic one."""
     
-    # Import routers here to avoid circular imports
-    # These will be implemented in the next files
-    try:
-        from src.layers.application.api.digital_twins import router as digital_twins_router
-        from src.layers.application.api.services import router as services_router
-        from src.layers.application.api.replicas import router as replicas_router
-        from src.layers.application.api.workflows import router as workflows_router
-        
-        # Register routers with prefixes
-        app.include_router(digital_twins_router, prefix="/api/v1/digital-twins", tags=["Digital Twins"])
-        app.include_router(services_router, prefix="/api/v1/services", tags=["Services"])
-        app.include_router(replicas_router, prefix="/api/v1/replicas", tags=["Digital Replicas"])
-        app.include_router(workflows_router, prefix="/api/v1/workflows", tags=["Workflows"])
-        
-        logger.info("All API routers registered successfully")
-        
-    except ImportError as e:
-        logger.warning(f"Some API routers not available yet: {e}")
-
+    routers_config = [
+        ('digital_twins', 'src.layers.application.api.digital_twins', '/api/v1/digital-twins', ['Digital Twins']),
+        ('services', 'src.layers.application.api.services', '/api/v1/services', ['Services']),  
+        ('replicas', 'src.layers.application.api.replicas', '/api/v1/replicas', ['Digital Replicas']),
+        ('workflows', 'src.layers.application.api.workflows', '/api/v1/workflows', ['Workflows'])
+    ]
+    
+    for router_name, module_path, prefix, tags in routers_config:
+        try:
+            logger.info(f"Attempting to import {router_name} router...")
+            
+            # Import specifico per debug
+            if router_name == 'digital_twins':
+                from src.layers.application.api.digital_twins import router
+                app.include_router(router, prefix=prefix, tags=tags)
+                
+            elif router_name == 'services':
+                from src.layers.application.api.services import router
+                app.include_router(router, prefix=prefix, tags=tags)
+                
+            elif router_name == 'replicas':
+                from src.layers.application.api.replicas import router  
+                app.include_router(router, prefix=prefix, tags=tags)
+                
+            elif router_name == 'workflows':
+                from src.layers.application.api.workflows import router
+                app.include_router(router, prefix=prefix, tags=tags)
+            
+            logger.info(f"✓ Successfully registered {router_name} router")
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to register {router_name} router: {e}")
+            logger.exception(f"Full traceback for {router_name}:")
+            # Continua con gli altri router invece di fermarsi
+            continue
+    
+    logger.info("Router registration process completed")
 
 # Root endpoints
 def setup_root_endpoints(app: FastAPI) -> None:

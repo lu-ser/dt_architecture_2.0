@@ -43,6 +43,7 @@ class ReplicaCreate(BaseModel):
     overrides: Optional[Dict[str, Any]] = Field(None, description="Template overrides")
     
     @validator('replica_type')
+    @classmethod
     def validate_replica_type(cls, v):
         try:
             ReplicaType(v)
@@ -52,6 +53,7 @@ class ReplicaCreate(BaseModel):
             raise ValueError(f"Invalid replica_type. Must be one of: {valid_types}")
     
     @validator('aggregation_mode')
+    @classmethod
     def validate_aggregation_mode(cls, v):
         try:
             DataAggregationMode(v)

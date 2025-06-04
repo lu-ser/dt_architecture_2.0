@@ -413,21 +413,26 @@ class EnhancedDigitalTwinRegistry(BaseDigitalTwinRegistry):
         except DigitalTwinNotFoundError:
             logger.warning(f"Activity recorded for non-existent twin {twin_id}")
     
-    async def discover_twins_advanced(
-        self,
-        criteria: Dict[str, Any]
-    ) -> List[IDigitalTwin]:
-        """Advanced twin discovery with multiple criteria."""
-        # Start with basic discovery
-        twins = await self.discover_replicas(criteria)  # This should be discover_twins in the base class
+    async def discover_twins_advanced(self, criteria: Dict[str, Any]) -> List[IDigitalTwin]:
+        # CORRETTO: Usa self.list() invece di self.discover_replicas()
+        filters = {}
         
-        # Apply advanced filters
-        if "has_capability" in criteria:
-            required_capability = TwinCapability(criteria["has_capability"])
+        # Converti i criteri in filtri per il database
+        if 'type' in criteria:
+            filters['twin_type'] = criteria['type']
+        if 'digital_twin_id' in criteria:
+            filters['id'] = criteria['digital_twin_id']
+        
+        # Ottieni tutti i twins che corrispondono ai filtri base
+        twins = await self.list(filters=filters)
+        
+        # Applica filtri avanzati
+        if 'has_capability' in criteria:
+            required_capability = TwinCapability(criteria['has_capability'])
             twins = [t for t in twins if required_capability in t.capabilities]
         
-        if "model_type" in criteria:
-            model_type = criteria["model_type"]
+        if 'model_type' in criteria:
+            model_type = criteria['model_type']
             filtered_twins = []
             for twin in twins:
                 for model in twin.integrated_models:
@@ -436,8 +441,8 @@ class EnhancedDigitalTwinRegistry(BaseDigitalTwinRegistry):
                         break
             twins = filtered_twins
         
-        if "has_associations" in criteria:
-            association_type = criteria["has_associations"]
+        if 'has_associations' in criteria:
+            association_type = criteria['has_associations']
             filtered_twins = []
             for twin in twins:
                 associations = await self.get_twin_associations(twin.id, association_type)
@@ -445,18 +450,18 @@ class EnhancedDigitalTwinRegistry(BaseDigitalTwinRegistry):
                     filtered_twins.append(twin)
             twins = filtered_twins
         
-        if "in_hierarchy" in criteria:
-            parent_id = UUID(criteria["in_hierarchy"])
+        if 'in_hierarchy' in criteria:
+            parent_id = UUID(criteria['in_hierarchy'])
             children = await self.get_twin_children(parent_id)
             child_ids = set(child.id for child in children)
             twins = [t for t in twins if t.id in child_ids]
         
-        if "min_model_count" in criteria:
-            min_count = criteria["min_model_count"]
+        if 'min_model_count' in criteria:
+            min_count = criteria['min_model_count']
             twins = [t for t in twins if len(t.integrated_models) >= min_count]
         
         return twins
-    
+
     async def get_twin_performance_summary(self, twin_id: UUID) -> Dict[str, Any]:
         """Get performance summary for a Digital Twin."""
         try:

@@ -41,6 +41,7 @@ class DigitalTwinCreate(BaseModel):
     parent_twin_id: Optional[UUID] = Field(None, description="Parent twin for hierarchy")
     
     @validator('twin_type')
+    @classmethod
     def validate_twin_type(cls, v):
         try:
             DigitalTwinType(v)
@@ -50,6 +51,7 @@ class DigitalTwinCreate(BaseModel):
             raise ValueError(f"Invalid twin_type. Must be one of: {valid_types}")
     
     @validator('capabilities')
+    @classmethod
     def validate_capabilities(cls, v):
         try:
             for cap in v:
@@ -67,6 +69,7 @@ class CapabilityExecution(BaseModel):
     execution_config: Optional[Dict[str, Any]] = Field(None, description="Execution configuration")
     
     @validator('capability')
+    @classmethod
     def validate_capability(cls, v):
         try:
             TwinCapability(v)

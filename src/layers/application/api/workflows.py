@@ -74,6 +74,7 @@ class WorkflowCreate(BaseModel):
     schedule: Optional[Dict[str, Any]] = Field(None, description="Optional scheduling configuration")
     
     @validator('workflow_type')
+    @classmethod
     def validate_workflow_type(cls, v):
         valid_types = ["sequential", "parallel", "conditional", "loop", "dag"]
         if v not in valid_types:
@@ -122,6 +123,7 @@ class WorkflowExecution(BaseModel):
     callback_url: Optional[str] = Field(None, description="Callback URL for completion notification")
     
     @validator('priority')
+    @classmethod
     def validate_priority(cls, v):
         valid_priorities = ["low", "normal", "high", "critical"]
         if v not in valid_priorities:

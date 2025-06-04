@@ -80,6 +80,7 @@ class ServiceExecution(BaseModel):
     timeout: Optional[int] = Field(None, ge=1, description="Execution timeout in seconds")
     
     @validator('priority')
+    @classmethod
     def validate_priority(cls, v):
         try:
             ServicePriority(v)
