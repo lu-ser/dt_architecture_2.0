@@ -9,6 +9,7 @@ import uvicorn
 from src.layers.application.api_gateway import get_api_gateway, initialize_api_gateway
 from src.utils.exceptions import APIGatewayError, AuthenticationError, EntityNotFoundError, ValidationError
 from src.utils.config import get_config
+from src.layers.application.auth import get_auth_manager
 logger = logging.getLogger(__name__)
 app: FastAPI = None
 
@@ -78,11 +79,14 @@ def get_gateway_dependency():
 get_gateway = get_gateway_dependency()
 
 def register_routers(app: FastAPI) -> None:
-    routers_config = [('digital_twins', 'src.layers.application.api.digital_twins', '/api/v1/digital-twins', ['Digital Twins']), ('services', 'src.layers.application.api.services', '/api/v1/services', ['Services']), ('replicas', 'src.layers.application.api.replicas', '/api/v1/replicas', ['Digital Replicas']), ('workflows', 'src.layers.application.api.workflows', '/api/v1/workflows', ['Workflows'])]
+    routers_config = [('auth', 'src.layers.application.api.auth', '/api/v1/auth', ['Authentication']), ('digital_twins', 'src.layers.application.api.digital_twins', '/api/v1/digital-twins', ['Digital Twins']), ('services', 'src.layers.application.api.services', '/api/v1/services', ['Services']), ('replicas', 'src.layers.application.api.replicas', '/api/v1/replicas', ['Digital Replicas']), ('workflows', 'src.layers.application.api.workflows', '/api/v1/workflows', ['Workflows'])]
     for router_name, module_path, prefix, tags in routers_config:
         try:
             logger.info(f'Attempting to import {router_name} router...')
-            if router_name == 'digital_twins':
+            if router_name == 'auth':
+                from src.layers.application.api.auth import router
+                app.include_router(router, prefix=prefix, tags=tags)
+            elif router_name == 'digital_twins':
                 from src.layers.application.api.digital_twins import router
                 app.include_router(router, prefix=prefix, tags=tags)
             elif router_name == 'services':
@@ -105,12 +109,15 @@ def setup_root_endpoints(app: FastAPI) -> None:
 
     @app.get('/', summary='Root endpoint')
     async def root():
-        return {'name': 'Digital Twin Platform API', 'version': '1.0.0', 'status': 'running', 'documentation': '/docs'}
+        return {'name': 'Digital Twin Platform API', 'version': '1.0.0', 'status': 'running', 'documentation': '/docs', 'auth': {'registration': '/api/v1/auth/register', 'login': '/api/v1/auth/login', 'docs': '/docs#/Authentication'}}
 
     @app.get('/health', summary='Health check')
     async def health_check(gateway=Depends(get_gateway)):
         try:
             status_info = await gateway.get_gateway_status()
+            auth_manager = get_auth_manager()
+            auth_status = auth_manager.get_auth_status()
+            status_info['auth'] = auth_status
             return {'status': 'healthy' if gateway.is_ready() else 'degraded', 'timestamp': status_info['gateway']['timestamp'], 'details': status_info}
         except Exception as e:
             logger.error(f'Health check failed: {e}')
@@ -119,7 +126,10 @@ def setup_root_endpoints(app: FastAPI) -> None:
     @app.get('/platform/overview', summary='Platform overview')
     async def platform_overview(gateway=Depends(get_gateway)):
         try:
-            return await gateway.get_platform_overview()
+            overview = await gateway.get_platform_overview()
+            auth_manager = get_auth_manager()
+            overview['auth_statistics'] = auth_manager.get_auth_status()
+            return overview
         except Exception as e:
             logger.error(f'Platform overview failed: {e}')
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Failed to get platform overview: {e}')

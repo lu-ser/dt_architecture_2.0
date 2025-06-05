@@ -25,7 +25,7 @@ from src.utils.exceptions import (
     ValidationError
 )
 from src.utils.config import get_config
-
+from src.layers.application.auth import get_auth_manager
 logger = logging.getLogger(__name__)
 
 
@@ -192,6 +192,7 @@ def register_routers(app: FastAPI) -> None:
     """Register routers one by one to identify the problematic one."""
     
     routers_config = [
+        ('auth', 'src.layers.application.api.auth', '/api/v1/auth', ['Authentication']),
         ('digital_twins', 'src.layers.application.api.digital_twins', '/api/v1/digital-twins', ['Digital Twins']),
         ('services', 'src.layers.application.api.services', '/api/v1/services', ['Services']),  
         ('replicas', 'src.layers.application.api.replicas', '/api/v1/replicas', ['Digital Replicas']),
@@ -202,29 +203,26 @@ def register_routers(app: FastAPI) -> None:
         try:
             logger.info(f"Attempting to import {router_name} router...")
             
-            # Import specifico per debug
-            if router_name == 'digital_twins':
+            if router_name == 'auth':
+                # === NUOVO: Import del router auth ===
+                from src.layers.application.api.auth import router
+                app.include_router(router, prefix=prefix, tags=tags)
+            elif router_name == 'digital_twins':
                 from src.layers.application.api.digital_twins import router
                 app.include_router(router, prefix=prefix, tags=tags)
-                
             elif router_name == 'services':
                 from src.layers.application.api.services import router
                 app.include_router(router, prefix=prefix, tags=tags)
-                
             elif router_name == 'replicas':
-                from src.layers.application.api.replicas import router  
+                from src.layers.application.api.replicas import router
                 app.include_router(router, prefix=prefix, tags=tags)
-                
             elif router_name == 'workflows':
                 from src.layers.application.api.workflows import router
                 app.include_router(router, prefix=prefix, tags=tags)
-            
-            logger.info(f"✓ Successfully registered {router_name} router")
-            
+            logger.info(f'✓ Successfully registered {router_name} router')
         except Exception as e:
-            logger.error(f"✗ Failed to register {router_name} router: {e}")
-            logger.exception(f"Full traceback for {router_name}:")
-            # Continua con gli altri router invece di fermarsi
+            logger.error(f'✗ Failed to register {router_name} router: {e}')
+            logger.exception(f'Full traceback for {router_name}:')
             continue
     
     logger.info("Router registration process completed")
@@ -237,10 +235,15 @@ def setup_root_endpoints(app: FastAPI) -> None:
     async def root():
         """Root endpoint with basic platform information."""
         return {
-            "name": "Digital Twin Platform API",
-            "version": "1.0.0",
-            "status": "running",
-            "documentation": "/docs"
+            'name': 'Digital Twin Platform API',
+            'version': '1.0.0',
+            'status': 'running',
+            'documentation': '/docs',
+            'auth': {
+                'registration': '/api/v1/auth/register',
+                'login': '/api/v1/auth/login',
+                'docs': '/docs#/Authentication'
+            }
         }
     
     @app.get("/health", summary="Health check")
@@ -248,6 +251,9 @@ def setup_root_endpoints(app: FastAPI) -> None:
         """Health check endpoint."""
         try:
             status_info = await gateway.get_gateway_status()
+            auth_manager = get_auth_manager()
+            auth_status = auth_manager.get_auth_status()
+            status_info['auth'] = auth_status
             return {
                 "status": "healthy" if gateway.is_ready() else "degraded",
                 "timestamp": status_info["gateway"]["timestamp"],
@@ -264,7 +270,13 @@ def setup_root_endpoints(app: FastAPI) -> None:
     async def platform_overview(gateway = Depends(get_gateway)):
         """Get comprehensive platform overview."""
         try:
-            return await gateway.get_platform_overview()
+            overview = await gateway.get_platform_overview()
+            
+            # === NUOVO: Aggiungi statistiche auth ===
+            auth_manager = get_auth_manager()
+            overview['auth_statistics'] = auth_manager.get_auth_status()
+            
+            return overview
         except Exception as e:
             logger.error(f"Platform overview failed: {e}")
             raise HTTPException(
