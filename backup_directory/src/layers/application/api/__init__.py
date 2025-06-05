@@ -20,6 +20,9 @@ async def lifespan(app: FastAPI):
         gateway = await initialize_api_gateway()
         logger.info('API Gateway initialized')
         app.state.gateway = gateway
+        auth_manager = get_auth_manager()
+        await auth_manager.initialize()
+        logger.info('Authentication system initialized')
         yield
     except Exception as e:
         logger.error(f'Failed to start API: {e}')
@@ -29,7 +32,7 @@ async def lifespan(app: FastAPI):
 
 def create_fastapi_app() -> FastAPI:
     config = get_config()
-    fastapi_app = FastAPI(title='Digital Twin Platform API', description='Generic REST API for Digital Twin Platform external access', version='1.0.0', docs_url='/docs', redoc_url='/redoc', openapi_url='/openapi.json', lifespan=lifespan)
+    fastapi_app = FastAPI(title='Digital Twin Platform API', description='REST API for Digital Twin Platform', version='1.0.0', docs_url='/docs', redoc_url='/redoc', openapi_url='/openapi.json', lifespan=lifespan)
     fastapi_app.add_middleware(CORSMiddleware, allow_origins=config.get('api', {}).get('cors_origins', ['*']), allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
     allowed_hosts = config.get('api', {}).get('allowed_hosts', ['*'])
     if allowed_hosts != ['*']:
@@ -79,37 +82,39 @@ def get_gateway_dependency():
 get_gateway = get_gateway_dependency()
 
 def register_routers(app: FastAPI) -> None:
-    routers_config = [('auth', 'src.layers.application.api.auth', '/api/v1/auth', ['Authentication']), ('digital_twins', 'src.layers.application.api.digital_twins', '/api/v1/digital-twins', ['Digital Twins']), ('services', 'src.layers.application.api.services', '/api/v1/services', ['Services']), ('replicas', 'src.layers.application.api.replicas', '/api/v1/replicas', ['Digital Replicas']), ('workflows', 'src.layers.application.api.workflows', '/api/v1/workflows', ['Workflows'])]
-    for router_name, module_path, prefix, tags in routers_config:
+    routers_to_register = [{'name': 'auth', 'prefix': '/api/v1/auth', 'tags': ['Authentication'], 'module_path': 'src.layers.application.api.auth'}, {'name': 'digital_twins', 'prefix': '/api/v1/digital-twins', 'tags': ['Digital Twins'], 'module_path': 'src.layers.application.api.digital_twins'}, {'name': 'services', 'prefix': '/api/v1/services', 'tags': ['Services'], 'module_path': 'src.layers.application.api.services'}, {'name': 'replicas', 'prefix': '/api/v1/replicas', 'tags': ['Digital Replicas'], 'module_path': 'src.layers.application.api.replicas'}, {'name': 'workflows', 'prefix': '/api/v1/workflows', 'tags': ['Workflows'], 'module_path': 'src.layers.application.api.workflows'}]
+    successful_routers = []
+    failed_routers = []
+    for router_config in routers_to_register:
         try:
-            logger.info(f'Attempting to import {router_name} router...')
-            if router_name == 'auth':
-                from src.layers.application.api.auth import router
-                app.include_router(router, prefix=prefix, tags=tags)
-            elif router_name == 'digital_twins':
-                from src.layers.application.api.digital_twins import router
-                app.include_router(router, prefix=prefix, tags=tags)
-            elif router_name == 'services':
-                from src.layers.application.api.services import router
-                app.include_router(router, prefix=prefix, tags=tags)
-            elif router_name == 'replicas':
-                from src.layers.application.api.replicas import router
-                app.include_router(router, prefix=prefix, tags=tags)
-            elif router_name == 'workflows':
-                from src.layers.application.api.workflows import router
-                app.include_router(router, prefix=prefix, tags=tags)
-            logger.info(f'✓ Successfully registered {router_name} router')
+            logger.info(f"Registering {router_config['name']} router...")
+            module = __import__(router_config['module_path'], fromlist=['router'])
+            router = getattr(module, 'router')
+            app.include_router(router, prefix=router_config['prefix'], tags=router_config['tags'])
+            successful_routers.append(router_config['name'])
+            logger.info(f"✓ Successfully registered {router_config['name']} router")
+        except ImportError as e:
+            failed_routers.append({'name': router_config['name'], 'error': f'Import error: {str(e)}'})
+            logger.error(f"✗ Failed to import {router_config['name']} router: {e}")
+        except AttributeError as e:
+            failed_routers.append({'name': router_config['name'], 'error': f'Router not found in module: {str(e)}'})
+            logger.error(f"✗ Router not found in {router_config['name']} module: {e}")
         except Exception as e:
-            logger.error(f'✗ Failed to register {router_name} router: {e}')
-            logger.exception(f'Full traceback for {router_name}:')
-            continue
-    logger.info('Router registration process completed')
+            failed_routers.append({'name': router_config['name'], 'error': f'Unexpected error: {str(e)}'})
+            logger.error(f"✗ Unexpected error registering {router_config['name']} router: {e}")
+            logger.exception(f"Full traceback for {router_config['name']}:")
+    logger.info(f'Router registration completed:')
+    logger.info(f'  ✓ Successful: {len(successful_routers)} - {successful_routers}')
+    if failed_routers:
+        logger.warning(f'  ✗ Failed: {len(failed_routers)}')
+        for failed in failed_routers:
+            logger.warning(f"    - {failed['name']}: {failed['error']}")
 
 def setup_root_endpoints(app: FastAPI) -> None:
 
     @app.get('/', summary='Root endpoint')
     async def root():
-        return {'name': 'Digital Twin Platform API', 'version': '1.0.0', 'status': 'running', 'documentation': '/docs', 'auth': {'registration': '/api/v1/auth/register', 'login': '/api/v1/auth/login', 'docs': '/docs#/Authentication'}}
+        return {'name': 'Digital Twin Platform API', 'version': '1.0.0', 'status': 'running', 'documentation': '/docs', 'endpoints': {'auth': '/api/v1/auth', 'digital_twins': '/api/v1/digital-twins', 'services': '/api/v1/services', 'replicas': '/api/v1/replicas', 'workflows': '/api/v1/workflows'}, 'auth': {'registration': '/api/v1/auth/register', 'login': '/api/v1/auth/login', 'docs': '/docs#/Authentication'}}
 
     @app.get('/health', summary='Health check')
     async def health_check(gateway=Depends(get_gateway)):
@@ -137,9 +142,11 @@ def setup_root_endpoints(app: FastAPI) -> None:
 def get_app() -> FastAPI:
     global app
     if app is None:
+        logger.info('Creating FastAPI application...')
         app = create_fastapi_app()
         setup_root_endpoints(app)
         register_routers(app)
+        logger.info('FastAPI application created and configured')
     return app
 
 async def start_api_server(host: str='0.0.0.0', port: int=8000, reload: bool=False) -> None:

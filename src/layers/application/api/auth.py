@@ -131,6 +131,7 @@ async def register_user(
     - Setup Digital Twin identity system
     """
     try:
+        print("Hello")
         # Converti in oggetto di dominio
         registration_request = UserRegistrationRequest(
             username=registration_data.username,

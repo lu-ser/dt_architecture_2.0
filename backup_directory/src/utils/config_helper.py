@@ -1,6 +1,7 @@
 import logging
 from typing import Any, Dict, Optional, Union
 from src.utils.config import PlatformConfig, get_config as _get_config
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ConfigProxy:

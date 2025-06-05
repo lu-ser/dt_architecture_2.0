@@ -92,6 +92,7 @@ async def get_registration_service() -> UserRegistrationService:
 @router.post('/register', summary='Register New User', response_model=RegistrationResponse)
 async def register_user(registration_data: UserRegistration, request: Request, registration_service: UserRegistrationService=Depends(get_registration_service)) -> Dict[str, Any]:
     try:
+        print('Hello')
         registration_request = UserRegistrationRequest(username=registration_data.username, email=registration_data.email, password=registration_data.password, first_name=registration_data.first_name, last_name=registration_data.last_name, company_name=registration_data.company_name, plan=registration_data.plan)
         result = await registration_service.register_user(registration_request)
         logger.info(f"User registration: {registration_data.email} -> {result.get('status')}")
