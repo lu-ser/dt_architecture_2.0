@@ -31,48 +31,76 @@ from src.utils.exceptions import (
     DigitalTwinError
 )
 from src.utils.config import get_config
-
+from enum import Enum
 logger = logging.getLogger(__name__)
 
-
+class DTAccessLevel(Enum):
+    NONE = "none"
+    READ = "read" 
+    WRITE = "write"
+    EXECUTE = "execute"
+    ADMIN = "admin"
 class StandardDigitalTwin(IDigitalTwin):
-    """Standard implementation of a Digital Twin."""
-    
-    def __init__(
-        self,
-        twin_id: UUID,
-        configuration: DigitalTwinConfiguration,
-        metadata: BaseMetadata,
-        models: Optional[List[TwinModel]] = None
-    ):
-        self._id = twin_id
-        self._configuration = configuration
-        self._metadata = metadata
-        self._current_state = DigitalTwinState.LEARNING
-        self._status = EntityStatus.CREATED
-        
-        # Model management
-        self._integrated_models: Dict[UUID, TwinModel] = {}
-        if models:
-            for model in models:
-                self._integrated_models[model.model_id] = model
-        
-        # Replica associations
-        self._associated_replicas: Set[UUID] = set()
-        
-        # Internal state
-        self._twin_state: Dict[str, Any] = {}
-        self._last_update: Optional[datetime] = None
-        
-        # Performance tracking
-        self._model_executions = 0
-        self._data_updates = 0
-        self._predictions_made = 0
-        self._last_prediction: Optional[datetime] = None
-        
-        # Data processing
-        self._data_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        self._processing_task: Optional[asyncio.Task] = None
+    def __init__(self, twin_id: UUID, configuration: DigitalTwinConfiguration, 
+                    metadata: BaseMetadata, models: Optional[List[TwinModel]] = None,
+                    owner_id: Optional[UUID] = None, tenant_id: Optional[UUID] = None,
+                    security_enabled: bool = False):
+            self._id = twin_id
+            self._configuration = configuration
+            self._metadata = metadata
+            self._current_state = DigitalTwinState.LEARNING
+            self._status = EntityStatus.CREATED
+            
+            # Model management
+            self._integrated_models: Dict[UUID, TwinModel] = {}
+            if models:
+                for model in models:
+                    self._integrated_models[model.model_id] = model
+            
+            # Replica associations
+            self._associated_replicas: Set[UUID] = set()
+            
+            # Internal state
+            self._twin_state: Dict[str, Any] = {}
+            self._last_update: Optional[datetime] = None
+            
+            # Performance tracking
+            self._model_executions = 0
+            self._data_updates = 0
+            self._predictions_made = 0
+            self._last_prediction: Optional[datetime] = None
+            
+            # Data processing
+            self._data_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+            self._processing_task: Optional[asyncio.Task] = None
+            self.security_enabled = security_enabled
+            
+            if security_enabled:
+                # Sicurezza abilitata
+                self.owner_id = owner_id or uuid4()  # Fallback se non specificato
+                self.tenant_id = tenant_id or uuid4()  # Fallback se non specificato
+                self.authorized_users: Dict[UUID, DTAccessLevel] = {self.owner_id: DTAccessLevel.ADMIN}
+                self.access_permissions: Dict[UUID, Set[str]] = {
+                    self.owner_id: {"read", "write", "execute", "admin", "manage_access"}
+                }
+                self.access_log: List[Dict[str, Any]] = []
+                self.last_accessed_by: Optional[UUID] = None
+                self.is_public = False
+                self.shared_with_tenant = True
+                self.dt_identity: Optional[Any] = None  # Will be set during initialization
+            else:
+                # Modalità legacy - nessun controllo di sicurezza
+                self.owner_id = owner_id
+                self.tenant_id = tenant_id
+                self.authorized_users = {}
+                self.access_permissions = {}
+                self.access_log = []
+                self.last_accessed_by = None
+                self.is_public = True
+                self.shared_with_tenant = True
+                self.dt_identity = None
+
+
     
     @property
     def id(self) -> UUID:
@@ -114,22 +142,147 @@ class StandardDigitalTwin(IDigitalTwin):
     def integrated_models(self) -> List[TwinModel]:
         return list(self._integrated_models.values())
     
+    def check_access(self, user_id: UUID, required_access: DTAccessLevel) -> bool:
+        """Check if user has required access level"""
+        if not self.security_enabled:
+            return True  # Legacy mode - accesso libero
+            
+        if user_id == self.owner_id:
+            return True
+            
+        user_access = self.authorized_users.get(user_id, DTAccessLevel.NONE)
+        
+        # Access hierarchy: ADMIN > EXECUTE > WRITE > READ > NONE
+        access_hierarchy = {
+            DTAccessLevel.ADMIN: 4,
+            DTAccessLevel.EXECUTE: 3, 
+            DTAccessLevel.WRITE: 2,
+            DTAccessLevel.READ: 1,
+            DTAccessLevel.NONE: 0
+        }
+        
+        return access_hierarchy[user_access] >= access_hierarchy[required_access]
+    
+    def grant_access(self, user_id: UUID, access_level: DTAccessLevel, granted_by: UUID) -> None:
+        """Grant access to user (only if security enabled)"""
+        if not self.security_enabled:
+            logger.warning(f"Attempted to grant access on non-secure twin {self._id}")
+            return
+            
+        if not (granted_by == self.owner_id or 
+                self.authorized_users.get(granted_by) == DTAccessLevel.ADMIN):
+            raise PermissionError("Only owner or admin can grant access")
+            
+        self.authorized_users[user_id] = access_level
+        
+        # Set permissions based on access level
+        permissions = set()
+        if access_level in [DTAccessLevel.READ, DTAccessLevel.WRITE, 
+                           DTAccessLevel.EXECUTE, DTAccessLevel.ADMIN]:
+            permissions.add("read")
+        if access_level in [DTAccessLevel.WRITE, DTAccessLevel.EXECUTE, DTAccessLevel.ADMIN]:
+            permissions.add("write") 
+        if access_level in [DTAccessLevel.EXECUTE, DTAccessLevel.ADMIN]:
+            permissions.add("execute")
+        if access_level == DTAccessLevel.ADMIN:
+            permissions.update({"admin", "manage_access"})
+            
+        self.access_permissions[user_id] = permissions
+        self._log_access_change("grant", user_id, access_level, granted_by)
+    
+    def revoke_access(self, user_id: UUID, revoked_by: UUID) -> None:
+        """Revoke user access"""
+        if not self.security_enabled:
+            return
+            
+        if user_id == self.owner_id:
+            raise PermissionError("Cannot revoke owner access")
+            
+        if not (revoked_by == self.owner_id or 
+                self.authorized_users.get(revoked_by) == DTAccessLevel.ADMIN):
+            raise PermissionError("Only owner or admin can revoke access")
+            
+        self.authorized_users.pop(user_id, None)
+        self.access_permissions.pop(user_id, None)
+        self._log_access_change("revoke", user_id, DTAccessLevel.NONE, revoked_by)
+    
+    def log_access(self, user_id: UUID, operation: str, success: bool = True) -> None:
+        """Log access attempt"""
+        if not self.security_enabled:
+            return
+            
+        self.last_accessed_by = user_id
+        
+        log_entry = {
+            "user_id": str(user_id),
+            "operation": operation, 
+            "success": success,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "user_access_level": self.authorized_users.get(user_id, DTAccessLevel.NONE).value
+        }
+        
+        self.access_log.append(log_entry)
+        
+        # Keep only last 100 entries
+        if len(self.access_log) > 100:
+            self.access_log = self.access_log[-100:]
+    
+    def is_accessible_by_tenant_user(self, user_id: UUID, user_tenant_id: UUID) -> bool:
+        """Check if user from tenant can access this twin"""
+        if not self.security_enabled:
+            return True
+            
+        if not self.tenant_id or user_tenant_id != self.tenant_id:
+            return False
+            
+        # Check if explicitly authorized
+        if user_id in self.authorized_users:
+            return True
+            
+        # Check tenant-wide sharing settings
+        return self.shared_with_tenant
+    
+    def _log_access_change(self, action: str, target_user: UUID, 
+                          access_level: DTAccessLevel, changed_by: UUID) -> None:
+        """Log access permission changes"""
+        if not self.security_enabled:
+            return
+            
+        log_entry = {
+            "action": action,
+            "target_user": str(target_user),
+            "access_level": access_level.value,
+            "changed_by": str(changed_by),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        self.access_log.append(log_entry)
     async def initialize(self) -> None:
         """Initialize the Digital Twin."""
         self._status = EntityStatus.INITIALIZING
         self._current_state = DigitalTwinState.LEARNING
         
-        # Initialize models
         for model in self._integrated_models.values():
             await self._initialize_model(model)
         
-        # Start data processing
-        await self._start_data_processing()
+        # Create Digital Twin identity if security enabled
+        if self.security_enabled and self.owner_id and self.tenant_id:
+            try:
+                from src.layers.application.auth.user_registration import DigitalTwinIdentityService
+                identity_service = DigitalTwinIdentityService()
+                self.dt_identity = await identity_service.create_identity(
+                    twin_id=self._id,
+                    owner_id=self.owner_id, 
+                    tenant_id=self.tenant_id
+                )
+                logger.info(f'Created Digital Twin identity for {self._id}')
+            except Exception as e:
+                logger.warning(f'Failed to create DT identity: {e}')
         
+        await self._start_data_processing()
         self._status = EntityStatus.ACTIVE
         self._current_state = DigitalTwinState.OPERATIONAL
         
-        logger.info(f"Digital Twin {self._id} ({self.twin_type.value}) initialized")
+        logger.info(f'Digital Twin {self._id} ({self.twin_type.value}) initialized (security: {self.security_enabled})')
     
     async def start(self) -> None:
         """Start the Digital Twin operations."""
@@ -437,28 +590,56 @@ class StandardDigitalTwin(IDigitalTwin):
             "executed_at": datetime.now(timezone.utc).isoformat()
         }
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialize the Digital Twin to dictionary."""
-        return {
-            "id": str(self._id),
-            "twin_type": self.twin_type.value,
-            "name": self.name,
-            "description": self._configuration.description,
-            "current_state": self._current_state.value,
-            "status": self._status.value,
-            "capabilities": [cap.value for cap in self.capabilities],
-            "configuration": self._configuration.to_dict(),
-            "metadata": self._metadata.to_dict(),
-            "integrated_models": [model.to_dict() for model in self._integrated_models.values()],
-            "associated_replicas": [str(rid) for rid in self._associated_replicas],
-            "statistics": {
-                "model_executions": self._model_executions,
-                "data_updates": self._data_updates,
-                "predictions_made": self._predictions_made,
-                "last_update": self._last_update.isoformat() if self._last_update else None
+    def to_dict(self, include_security_details: bool = False) -> Dict[str, Any]:
+        """Enhanced to_dict with optional security information"""
+        base_dict = {
+            'id': str(self._id),
+            'twin_type': self.twin_type.value,
+            'name': self.name,
+            'description': self._configuration.description,
+            'current_state': self._current_state.value,
+            'status': self._status.value,
+            'capabilities': [cap.value for cap in self.capabilities],
+            'configuration': self._configuration.to_dict(),
+            'metadata': self._metadata.to_dict(),
+            'integrated_models': [model.to_dict() for model in self._integrated_models.values()],
+            'associated_replicas': [str(rid) for rid in self._associated_replicas],
+            'statistics': {
+                'model_executions': self._model_executions,
+                'data_updates': self._data_updates,
+                'predictions_made': self._predictions_made,
+                'last_update': self._last_update.isoformat() if self._last_update else None
             }
         }
-    
+        # Add security info if enabled
+        if self.security_enabled:
+            base_dict.update({
+                "security_enabled": True,
+                "owner_id": str(self.owner_id) if self.owner_id else None,
+                "tenant_id": str(self.tenant_id) if self.tenant_id else None,
+                "is_public": self.is_public,
+                "shared_with_tenant": self.shared_with_tenant,
+                "authorized_users_count": len(self.authorized_users),
+                "last_accessed_by": str(self.last_accessed_by) if self.last_accessed_by else None
+            })
+            
+            # Include detailed security info if requested
+            if include_security_details:
+                base_dict.update({
+                    "authorized_users": {
+                        str(uid): level.value for uid, level in self.authorized_users.items()
+                    },
+                    "access_permissions": {
+                        str(uid): list(perms) for uid, perms in self.access_permissions.items()
+                    },
+                    "recent_access_log": self.access_log[-10:] if self.access_log else [],
+                    "dt_identity": self.dt_identity.to_dict() if self.dt_identity else None
+                })
+        else:
+            base_dict["security_enabled"] = False
+            
+        return base_dict
+        
     def validate(self) -> bool:
         """Validate the Digital Twin configuration and state."""
         try:
@@ -622,47 +803,75 @@ class DigitalTwinFactory(IDigitalTwinFactory):
         self.config = get_config()
         self._supported_types = list(DigitalTwinType)
         self._model_templates: Dict[str, TwinModel] = {}
-        
-        # Load default model templates
         self._load_default_model_templates()
     
-    async def create_twin(
-        self,
-        twin_type: DigitalTwinType,
-        config: DigitalTwinConfiguration,
-        models: Optional[List[TwinModel]] = None,
-        metadata: Optional[BaseMetadata] = None
-    ) -> IDigitalTwin:
+    async def create_twin(self, twin_type: DigitalTwinType, config: DigitalTwinConfiguration, 
+                         models: Optional[List[TwinModel]] = None, metadata: Optional[BaseMetadata] = None,
+                         owner_id: Optional[UUID] = None, tenant_id: Optional[UUID] = None,
+                         security_enabled: bool = False) -> IDigitalTwin:
         """Create a new Digital Twin instance."""
         try:
-            # Validate configuration
             if not self.validate_twin_config(twin_type, config):
-                raise FactoryConfigurationError("Invalid Digital Twin configuration")
-            
-            # Create metadata if not provided
+                raise FactoryConfigurationError('Invalid Digital Twin configuration')
+
             if metadata is None:
+                creator_id = owner_id or uuid4()
+                custom_metadata = {'security_enabled': security_enabled}
+                if tenant_id:
+                    custom_metadata['tenant_id'] = str(tenant_id)
+                
                 metadata = BaseMetadata(
                     entity_id=uuid4(),
                     timestamp=datetime.now(timezone.utc),
-                    version="1.0.0",
-                    created_by=uuid4()  # Should be actual user ID
+                    version='1.0.0',
+                    created_by=creator_id,
+                    custom=custom_metadata
                 )
-            
-            # Create Digital Twin
+
+            # Create with security features
             twin = StandardDigitalTwin(
                 twin_id=metadata.id,
                 configuration=config,
                 metadata=metadata,
-                models=models
+                models=models,
+                owner_id=owner_id,
+                tenant_id=tenant_id,
+                security_enabled=security_enabled
             )
-            
-            logger.info(f"Created Digital Twin {metadata.id} of type {twin_type}")
+
+            logger.info(f'Created Digital Twin {metadata.id} (security: {security_enabled})')
             return twin
             
         except Exception as e:
-            logger.error(f"Failed to create Digital Twin: {e}")
-            raise EntityCreationError(f"Digital Twin creation failed: {e}")
+            logger.error(f'Failed to create Digital Twin: {e}')
+            raise EntityCreationError(f'Digital Twin creation failed: {e}')
     
+
+    async def create_secure_twin(self, twin_type: DigitalTwinType, config: DigitalTwinConfiguration,
+                                owner_id: UUID, tenant_id: UUID,
+                                models: Optional[List[TwinModel]] = None, 
+                                metadata: Optional[BaseMetadata] = None,
+                                authorized_users: Optional[Dict[UUID, DTAccessLevel]] = None) -> StandardDigitalTwin:
+        """Create a security-enabled Digital Twin"""
+        
+        # Create with security enabled
+        twin = await self.create_twin(
+            twin_type=twin_type,
+            config=config,
+            models=models,
+            metadata=metadata,
+            owner_id=owner_id,
+            tenant_id=tenant_id,
+            security_enabled=True
+        )
+        
+        # Add additional authorized users
+        if authorized_users:
+            for user_id, access_level in authorized_users.items():
+                twin.grant_access(user_id, access_level, owner_id)
+        
+        return twin
+
     async def create_from_template(
         self,
         template_name: str,

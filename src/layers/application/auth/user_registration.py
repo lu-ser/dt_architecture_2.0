@@ -1,4 +1,3 @@
-# === NEW FILE: src/layers/application/auth/user_registration.py ===
 
 import asyncio
 import logging
@@ -470,7 +469,6 @@ class UserRegistrationService:
         # TODO: implementare quando avremo il registry con tenant
         return 0
 
-# === NEW FILE: src/layers/application/auth/digital_twin_identity.py ===
 
 import secrets
 import jwt
