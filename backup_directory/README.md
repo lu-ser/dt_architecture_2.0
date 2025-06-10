@@ -1,1 +1,0 @@
-# dt_architecture_2.0

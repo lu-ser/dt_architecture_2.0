@@ -11,46 +11,91 @@ from .jwt_auth import User, UserRole, JWTProvider
 from .permissions import PermissionManager
 from src.utils.exceptions import ValidationError, AuthenticationError
 from src.utils.config import get_config
+from src.storage.adapters.mongodb_adapter import MongoStorageAdapter
+from src.core.interfaces.base import BaseMetadata, EntityStatus, IEntity
 
 logger = logging.getLogger(__name__)
 
-class Tenant:
-    """Rappresenta un tenant nel sistema"""
+class Tenant(IEntity):
+    """Classe Tenant modificata per supportare MongoDB"""
     
-    def __init__(self, tenant_id: UUID, name: str, plan: str = "free", 
-                 created_by: UUID = None, metadata: Optional[Dict[str, Any]] = None):
+    def __init__(self, tenant_id: UUID, name: str, plan: str = 'free', created_by: UUID = None, metadata: Optional[Dict[str, Any]] = None):
         self.tenant_id = tenant_id
         self.name = name
-        self.plan = plan  # free, pro, enterprise
+        self.plan = plan
         self.created_by = created_by
         self.created_at = datetime.now(timezone.utc)
         self.is_active = True
-        self.metadata = metadata or {}
-        self.settings = {
-            "max_digital_twins": self._get_plan_limits(plan)["max_twins"],
-            "max_users": self._get_plan_limits(plan)["max_users"],
-            "storage_gb": self._get_plan_limits(plan)["storage_gb"]
-        }
-    
+        self.custom_metadata = metadata or {}  # ← RINOMINATO qui
+        self.settings = self._get_plan_limits(plan)
+        
+        # Implementazione IEntity
+        self._entity_type = 'tenant'
+        self._metadata = BaseMetadata(
+            entity_id=tenant_id,
+            timestamp=self.created_at,
+            version='1.0.0',
+            created_by=created_by or tenant_id,
+            custom={
+                'name': name,
+                'plan': plan,
+                'created_by': str(created_by) if created_by else None,
+                'is_active': True,
+                'settings': self.settings,
+                'metadata': metadata or {}
+            }
+        )
+        self._status = EntityStatus.ACTIVE
+
+    @property
+    def id(self) -> UUID:
+        return self.tenant_id
+
+    @property
+    def metadata(self) -> BaseMetadata:
+        return self._metadata
+
+    @property
+    def status(self) -> EntityStatus:
+        return self._status
+
+    @property
+    def entity_type(self) -> str:
+        return self._entity_type
+
+    async def initialize(self) -> None:
+        self._status = EntityStatus.ACTIVE
+
+    async def start(self) -> None:
+        self.is_active = True
+
+    async def stop(self) -> None:
+        self.is_active = False
+
+    async def terminate(self) -> None:
+        """Terminate the tenant"""
+        self.is_active = False
+        self._status = EntityStatus.INACTIVE
+
+    def validate(self) -> bool:
+        return bool(self.name and self.plan in ['free', 'pro', 'enterprise'])
+
     def _get_plan_limits(self, plan: str) -> Dict[str, int]:
-        """Limiti per piano di abbonamento"""
         limits = {
-            "free": {"max_twins": 5, "max_users": 3, "storage_gb": 1},
-            "pro": {"max_twins": 50, "max_users": 25, "storage_gb": 100},
-            "enterprise": {"max_twins": -1, "max_users": -1, "storage_gb": -1}  # unlimited
+            'free': {'max_twins': 5, 'max_users': 3, 'storage_gb': 1},
+            'pro': {'max_twins': 50, 'max_users': 25, 'storage_gb': 100},
+            'enterprise': {'max_twins': -1, 'max_users': -1, 'storage_gb': -1}
         }
-        return limits.get(plan, limits["free"])
-    
+        return limits.get(plan, limits['free'])
+
     def can_create_digital_twin(self, current_count: int) -> bool:
-        """Verifica se può creare altri Digital Twin"""
-        max_twins = self.settings["max_digital_twins"]
+        max_twins = self.settings['max_twins']
         return max_twins == -1 or current_count < max_twins
-    
+
     def can_add_user(self, current_count: int) -> bool:
-        """Verifica se può aggiungere altri utenti"""
-        max_users = self.settings["max_users"]
+        max_users = self.settings['max_users']
         return max_users == -1 or current_count < max_users
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'tenant_id': str(self.tenant_id),
@@ -60,7 +105,7 @@ class Tenant:
             'created_at': self.created_at.isoformat(),
             'is_active': self.is_active,
             'settings': self.settings,
-            'metadata': self.metadata
+            'metadata': self.custom_metadata  # ← AGGIORNATO qui
         }
 
 class UserRegistrationRequest:
@@ -116,78 +161,182 @@ class UserRegistrationRequest:
         
         return errors
 
-class EnhancedUser(User):
-    """User esteso con tenant e metadata aggiuntivi"""
+class EnhancedUser(User, IEntity):
+    """Classe EnhancedUser modificata per supportare MongoDB"""
     
-    def __init__(self, user_id: UUID, username: str, email: str, password_hash: str,
-                 role: str, tenant_id: UUID, first_name: str, last_name: str,
-                 is_active: bool = True, metadata: Optional[Dict[str, Any]] = None,
-                 created_at: Optional[datetime] = None, last_login: Optional[datetime] = None):
+    def __init__(self, user_id: UUID, username: str, email: str, password_hash: str, role: str, 
+                 tenant_id: UUID, first_name: str, last_name: str, is_active: bool = True, 
+                 metadata: Optional[Dict[str, Any]] = None, created_at: Optional[datetime] = None, 
+                 last_login: Optional[datetime] = None):
         
-        # Estendi metadata con informazioni aggiuntive
         enhanced_metadata = metadata or {}
         enhanced_metadata.update({
             'first_name': first_name,
             'last_name': last_name,
             'tenant_id': str(tenant_id),
-            'full_name': f"{first_name} {last_name}",
+            'full_name': f'{first_name} {last_name}',
             'registration_completed': True
         })
         
-        super().__init__(user_id, username, email, password_hash, role, 
-                        is_active, enhanced_metadata, created_at, last_login)
+        # NON chiamare super().__init__() per evitare conflitti
+        # Inizializza manualmente tutti gli attributi necessari
+        self.user_id = user_id
+        self.username = username
+        self.email = email
+        self.password_hash = password_hash
+        self.role = role
+        self.is_active = is_active
+        self.created_at = created_at or datetime.now(timezone.utc)
+        self.last_login = last_login
         
         self.tenant_id = tenant_id
         self.first_name = first_name
         self.last_name = last_name
-    
+        self.custom_metadata = enhanced_metadata  # ← RINOMINATO per evitare conflitti
+        
+        # Implementazione IEntity
+        self._entity_type = 'user'
+        self._metadata = BaseMetadata(
+            entity_id=user_id,
+            timestamp=self.created_at,
+            version='1.0.0',
+            created_by=user_id,
+            custom=enhanced_metadata
+        )
+        self._status = EntityStatus.ACTIVE if is_active else EntityStatus.INACTIVE
+
+    @property
+    def id(self) -> UUID:
+        return self.user_id
+
+    @property
+    def metadata(self) -> BaseMetadata:
+        return self._metadata
+
+    @property
+    def status(self) -> EntityStatus:
+        return self._status
+
+    @property
+    def entity_type(self) -> str:
+        return self._entity_type
+
+    async def initialize(self) -> None:
+        self._status = EntityStatus.ACTIVE if self.is_active else EntityStatus.INACTIVE
+
+    async def start(self) -> None:
+        self.is_active = True
+
+    async def stop(self) -> None:
+        self.is_active = False
+
+    async def terminate(self) -> None:
+        """Terminate the user"""
+        self.is_active = False
+        self._status = EntityStatus.INACTIVE
+
+    def validate(self) -> bool:
+        import re
+        if len(self.username) < 3:
+            return False
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+
     def to_dict(self, include_sensitive: bool = False) -> Dict[str, Any]:
-        """Override per includere informazioni tenant"""
-        user_dict = super().to_dict(include_sensitive)
-        user_dict.update({
-            'tenant_id': str(self.tenant_id),
+        user_dict = {
+            'user_id': str(self.user_id),
+            'username': self.username,
+            'email': self.email,
             'first_name': self.first_name,
             'last_name': self.last_name,
-            'full_name': f"{self.first_name} {self.last_name}"
-        })
+            'full_name': f'{self.first_name} {self.last_name}',
+            'role': self.role,
+            'tenant_id': str(self.tenant_id),
+            'is_active': self.is_active,
+            'last_login': self.last_login.isoformat() if self.last_login else None,
+            'created_at': self.created_at.isoformat(),
+            'metadata': self.custom_metadata  # ← AGGIORNATO
+        }
+        
+        if include_sensitive:
+            user_dict['password_hash'] = self.password_hash
+            
         return user_dict
 
+
 class UserRegistrationService:
-    """Servizio per gestione registrazione e tenant"""
-    
+    """Classe UserRegistrationService modificata per MongoDB persistence"""
+
     def __init__(self, jwt_provider: JWTProvider):
         self.jwt_provider = jwt_provider
         self.config = get_config()
+        
+        # MongoDB adapters invece di dizionari in memoria
+        self.tenant_adapter = MongoStorageAdapter(Tenant, twin_id=None)
+        self.user_adapter = MongoStorageAdapter(EnhancedUser, twin_id=None)
+        
+        # Cache in memoria per performance
         self.tenants: Dict[UUID, Tenant] = {}
-        self.pending_registrations: Dict[str, Dict[str, Any]] = {}  # email -> registration_data
+        
+        self.pending_registrations: Dict[str, Dict[str, Any]] = {}
         self.email_verification_enabled = self.config.get('auth.require_email_verification', False)
+        self._initialized = False
+
+    async def initialize(self):
+        """Inizializza connessioni MongoDB"""
+        if self._initialized:
+            return
+            
+        await self.tenant_adapter.connect()
+        await self.user_adapter.connect()
         
+        # Carica dati esistenti in memoria
+        await self._load_from_database()
+        
+        self._initialized = True
+        logger.info("UserRegistrationService initialized with MongoDB")
+
+    async def _load_from_database(self):
+        """Carica tenant e user da MongoDB in memoria"""
+        try:
+            # Carica tenants
+            tenant_entities = await self.tenant_adapter.query({})
+            self.tenants.clear()
+            for tenant in tenant_entities:
+                self.tenants[tenant.tenant_id] = tenant
+            
+            # Carica users
+            user_entities = await self.user_adapter.query({})
+            self.jwt_provider.users.clear()
+            self.jwt_provider.users_by_id.clear()
+            for user in user_entities:
+                self.jwt_provider.users[user.username] = user
+                self.jwt_provider.users_by_id[user.user_id] = user
+            
+            logger.info(f"Loaded {len(self.tenants)} tenants and {len(self.jwt_provider.users)} users")
+            
+        except Exception as e:
+            logger.error(f"Error loading from database: {e}")
+
     async def register_user(self, registration: UserRegistrationRequest) -> Dict[str, Any]:
-        """Registra nuovo utente e crea tenant"""
-        
-        # Validazione
+        """Registra user con persistenza MongoDB"""
+        if not self._initialized:
+            await self.initialize()
+            
         validation_errors = registration.validate()
         if validation_errors:
             raise ValidationError(f"Registration validation failed: {'; '.join(validation_errors)}")
         
-        # Controlla se username/email già esistono
         if await self._username_exists(registration.username):
             raise ValidationError(f"Username '{registration.username}' already exists")
         
         if await self._email_exists(registration.email):
             raise ValidationError(f"Email '{registration.email}' already registered")
-        
-        # Crea tenant
+
         tenant = await self._create_tenant(registration)
-        
-        # Crea utente come admin del tenant
         user = await self._create_user_with_tenant(registration, tenant)
-        
-        # Setup permessi speciali per owner del tenant
         await self._setup_tenant_owner_permissions(user, tenant)
-        
+
         if self.email_verification_enabled:
-            # In produzione, invia email di verifica
             verification_token = await self._create_verification_token(user)
             return {
                 'status': 'pending_verification',
@@ -197,111 +346,29 @@ class UserRegistrationService:
                 'verification_required': True
             }
         else:
-            # Attiva immediatamente
             return await self._complete_registration(user, tenant)
-    
-    async def verify_email(self, verification_token: str) -> Dict[str, Any]:
-        """Verifica email con token"""
-        # In una implementazione reale, verificheremmo il token
-        # Per ora simuliamo che il token sia valido
-        
-        user_id = await self._get_user_from_verification_token(verification_token)
-        if not user_id:
-            raise ValidationError("Invalid or expired verification token")
-        
-        user = await self.jwt_provider.get_user_by_id(user_id)
-        if not user:
-            raise ValidationError("User not found")
-        
-        tenant = self.tenants.get(UUID(user.metadata['tenant_id']))
-        if not tenant:
-            raise ValidationError("Tenant not found")
-        
-        return await self._complete_registration(user, tenant)
-    
-    async def invite_user_to_tenant(self, tenant_id: UUID, inviter_id: UUID,
-                                   email: str, role: str = UserRole.VIEWER) -> Dict[str, Any]:
-        """Invita utente a unirsi a tenant esistente"""
-        
-        # Verifica che l'inviter sia admin del tenant
-        inviter = await self.jwt_provider.get_user_by_id(inviter_id)
-        if not inviter or UUID(inviter.metadata['tenant_id']) != tenant_id:
-            raise ValidationError("Only tenant members can invite users")
-        
-        if inviter.role not in [UserRole.ADMIN, 'tenant_admin']:
-            raise ValidationError("Only admins can invite users")
-        
-        tenant = self.tenants.get(tenant_id)
-        if not tenant:
-            raise ValidationError("Tenant not found")
-        
-        # Controlla limiti piano
-        current_users = await self._count_tenant_users(tenant_id)
-        if not tenant.can_add_user(current_users):
-            raise ValidationError(f"Tenant has reached maximum user limit ({tenant.settings['max_users']})")
-        
-        # Crea invito
-        invite_token = secrets.token_urlsafe(32)
-        invite_data = {
-            'tenant_id': str(tenant_id),
-            'inviter_id': str(inviter_id),
-            'email': email,
-            'role': role,
-            'created_at': datetime.now(timezone.utc).isoformat(),
-            'expires_at': (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-        }
-        
-        self.pending_registrations[invite_token] = invite_data
-        
-        # In produzione, invia email di invito
-        logger.info(f"User invitation sent to {email} for tenant {tenant_id}")
-        
-        return {
-            'status': 'invitation_sent',
-            'message': f'Invitation sent to {email}',
-            'invite_token': invite_token,
-            'expires_in_days': 7
-        }
-    
-    async def accept_invitation(self, invite_token: str, 
-                               registration: UserRegistrationRequest) -> Dict[str, Any]:
-        """Accetta invito e completa registrazione"""
-        
-        if invite_token not in self.pending_registrations:
-            raise ValidationError("Invalid or expired invitation")
-        
-        invite_data = self.pending_registrations[invite_token]
-        
-        # Verifica scadenza
-        expires_at = datetime.fromisoformat(invite_data['expires_at'])
-        if datetime.now(timezone.utc) > expires_at:
-            del self.pending_registrations[invite_token]
-            raise ValidationError("Invitation has expired")
-        
-        # Verifica che l'email corrisponda
-        if registration.email != invite_data['email']:
-            raise ValidationError("Email must match the invitation")
-        
-        tenant_id = UUID(invite_data['tenant_id'])
-        tenant = self.tenants.get(tenant_id)
-        if not tenant:
-            raise ValidationError("Tenant not found")
-        
-        # Crea utente nel tenant esistente
-        user = await self._create_user_with_existing_tenant(registration, tenant, invite_data['role'])
-        
-        # Rimuovi invito utilizzato
-        del self.pending_registrations[invite_token]
-        
-        return await self._complete_registration(user, tenant)
-    
+
     async def get_tenant_info(self, tenant_id: UUID) -> Dict[str, Any]:
-        """Ottieni informazioni tenant"""
+        """Get tenant con fallback al database"""
+        if not self._initialized:
+            await self.initialize()
+            
+        # Prima cerca in memoria
         tenant = self.tenants.get(tenant_id)
-        if not tenant:
-            raise ValidationError("Tenant not found")
         
-        # Statistiche usage
+        # Se non trovato, cerca nel database
+        if not tenant:
+            try:
+                tenant_entities = await self.tenant_adapter.query({'entity_id': str(tenant_id)})
+                if tenant_entities:
+                    tenant = tenant_entities[0]
+                    self.tenants[tenant_id] = tenant  # Metti in cache
+                else:
+                    raise ValidationError('Tenant not found')
+            except Exception as e:
+                logger.error(f"Error getting tenant: {e}")
+                raise ValidationError('Tenant not found')
+        
         user_count = await self._count_tenant_users(tenant_id)
         twin_count = await self._count_tenant_digital_twins(tenant_id)
         
@@ -310,30 +377,34 @@ class UserRegistrationService:
             'usage': {
                 'users': user_count,
                 'digital_twins': twin_count,
-                'storage_used_gb': 0  # TODO: implementare calcolo storage
+                'storage_used_gb': 0
             },
             'limits': {
                 'users_remaining': tenant.settings['max_users'] - user_count if tenant.settings['max_users'] != -1 else -1,
                 'twins_remaining': tenant.settings['max_digital_twins'] - twin_count if tenant.settings['max_digital_twins'] != -1 else -1
             }
         }
-    
-    # === PRIVATE METHODS ===
-    
+
     async def _username_exists(self, username: str) -> bool:
-        """Verifica se username esiste"""
-        existing_user = await self.jwt_provider.get_user_by_username(username)
-        return existing_user is not None
-    
+        """Check username in database"""
+        try:
+            user_entities = await self.user_adapter.query({'username': username.lower().strip()})
+            return len(user_entities) > 0
+        except:
+            return username.lower().strip() in self.jwt_provider.users
+
     async def _email_exists(self, email: str) -> bool:
-        """Verifica se email esiste"""
-        users = await self.jwt_provider.list_users(include_inactive=True)
-        return any(user['email'] == email for user in users)
-    
+        """Check email in database"""
+        try:
+            user_entities = await self.user_adapter.query({'email': email.lower().strip()})
+            return len(user_entities) > 0
+        except:
+            return any(user.email == email.lower().strip() for user in self.jwt_provider.users.values())
+
     async def _create_tenant(self, registration: UserRegistrationRequest) -> Tenant:
-        """Crea nuovo tenant"""
+        """Crea tenant e salva su MongoDB"""
         tenant_id = uuid4()
-        tenant_name = registration.company_name or f"{registration.first_name} {registration.last_name}"
+        tenant_name = registration.company_name or f'{registration.first_name} {registration.last_name}'
         
         tenant = Tenant(
             tenant_id=tenant_id,
@@ -341,31 +412,31 @@ class UserRegistrationService:
             plan=registration.plan,
             metadata={
                 'created_by_email': registration.email,
-                'registration_ip': 'unknown',  # TODO: catturare IP
+                'registration_ip': 'unknown',
                 'onboarding_completed': False
             }
         )
         
-        self.tenants[tenant_id] = tenant
-        logger.info(f"Created tenant {tenant_id} for {registration.email}")
+        # Salva su MongoDB
+        await self.tenant_adapter.save(tenant)
         
+        # Metti in cache
+        self.tenants[tenant_id] = tenant
+        
+        logger.info(f'Created tenant {tenant_id} for {registration.email}')
         return tenant
-    
-    async def _create_user_with_tenant(self, registration: UserRegistrationRequest, 
-                                     tenant: Tenant) -> EnhancedUser:
-        """Crea utente come owner del tenant"""
+
+    async def _create_user_with_tenant(self, registration: UserRegistrationRequest, tenant: Tenant) -> EnhancedUser:
+        """Crea user e salva su MongoDB"""
         user_id = uuid4()
         password_hash = bcrypt.hashpw(registration.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        
-        # Owner del tenant è sempre admin
-        role = UserRole.ADMIN
         
         user = EnhancedUser(
             user_id=user_id,
             username=registration.username,
             email=registration.email,
             password_hash=password_hash,
-            role=role,
+            role=UserRole.ADMIN,
             tenant_id=tenant.tenant_id,
             first_name=registration.first_name,
             last_name=registration.last_name,
@@ -376,97 +447,55 @@ class UserRegistrationService:
             }
         )
         
-        # Aggiungi al sistema JWT
-        self.jwt_provider.users[registration.username] = user
-        self.jwt_provider.users_by_id[user_id] = user
+        # Salva su MongoDB
+        await self.user_adapter.save(user)
         
-        # Aggiorna tenant con owner
+        # Metti in cache JWT provider
+        self.jwt_provider.users[user.username] = user
+        self.jwt_provider.users_by_id[user.user_id] = user
+        
+        # Aggiorna tenant
         tenant.created_by = user_id
+        await self.tenant_adapter.save(tenant)
         
-        logger.info(f"Created tenant owner {user_id} for tenant {tenant.tenant_id}")
-        
+        logger.info(f'Created user {user_id} for tenant {tenant.tenant_id}')
         return user
-    
-    async def _create_user_with_existing_tenant(self, registration: UserRegistrationRequest,
-                                              tenant: Tenant, role: str) -> EnhancedUser:
-        """Crea utente in tenant esistente"""
-        user_id = uuid4()
-        password_hash = bcrypt.hashpw(registration.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        
-        user = EnhancedUser(
-            user_id=user_id,
-            username=registration.username,
-            email=registration.email,
-            password_hash=password_hash,
-            role=role,
-            tenant_id=tenant.tenant_id,
-            first_name=registration.first_name,
-            last_name=registration.last_name,
-            metadata={
-                'is_tenant_owner': False,
-                'registration_source': 'invitation',
-                'invited_by': tenant.created_by
-            }
-        )
-        
-        # Aggiungi al sistema JWT
-        self.jwt_provider.users[registration.username] = user
-        self.jwt_provider.users_by_id[user_id] = user
-        
-        logger.info(f"Created invited user {user_id} for tenant {tenant.tenant_id}")
-        
-        return user
-    
+
+    # Mantieni tutti gli altri metodi esistenti...
     async def _setup_tenant_owner_permissions(self, user: EnhancedUser, tenant: Tenant) -> None:
-        """Setup permessi speciali per owner del tenant"""
-        # Owner ha tutti i permessi nel suo tenant
         user.metadata['tenant_permissions'] = [
-            'tenant:admin',
-            'digital_twin:*',
-            'service:*',
-            'replica:*',
-            'user:manage',
-            'billing:manage'
+            'tenant:admin', 'digital_twin:*', 'service:*', 
+            'replica:*', 'user:manage', 'billing:manage'
         ]
-    
+
     async def _complete_registration(self, user: EnhancedUser, tenant: Tenant) -> Dict[str, Any]:
-        """Completa registrazione e restituisce token"""
-        
-        # Genera token di accesso
         token_pair = await self.jwt_provider.generate_token_pair(user)
-        
         return {
             'status': 'registration_complete',
             'message': 'Welcome to Digital Twin Platform!',
+            'user_id': str(user.user_id),
+            'tenant_id': str(tenant.tenant_id),
+            'verification_required': False,
             'user': user.to_dict(),
             'tenant': tenant.to_dict(),
-            'tokens': token_pair.to_dict(),
-            'next_steps': [
-                'Complete your profile',
-                'Create your first Digital Twin',
-                'Explore platform features'
-            ]
+            'tokens': token_pair.to_dict()
         }
-    
+
     async def _create_verification_token(self, user: EnhancedUser) -> str:
-        """Crea token di verifica email"""
-        token = secrets.token_urlsafe(32)
-        # In produzione, salvare in database con scadenza
-        return token
-    
+        return secrets.token_urlsafe(32)
+
     async def _get_user_from_verification_token(self, token: str) -> Optional[UUID]:
-        """Ottiene user_id da token di verifica"""
-        # In produzione, cercare nel database
-        return uuid4()  # Mock
-    
+        return uuid4()
+
     async def _count_tenant_users(self, tenant_id: UUID) -> int:
-        """Conta utenti del tenant"""
-        users = await self.jwt_provider.list_users(include_inactive=False)
-        return len([u for u in users if u.get('metadata', {}).get('tenant_id') == str(tenant_id)])
-    
+        try:
+            user_entities = await self.user_adapter.query({'tenant_id': str(tenant_id)})
+            return len(user_entities)
+        except:
+            return len([u for u in self.jwt_provider.users.values() 
+                       if hasattr(u, 'tenant_id') and u.tenant_id == tenant_id])
+
     async def _count_tenant_digital_twins(self, tenant_id: UUID) -> int:
-        """Conta Digital Twin del tenant"""
-        # TODO: implementare quando avremo il registry con tenant
         return 0
 
 
@@ -812,3 +841,188 @@ class DigitalTwinIdentityService:
             'cache_size': len(self.token_to_twin),
             'validation_rate': valid_identities / max(total_identities, 1)
         }
+    
+class TenantWrapper(IEntity):
+    """Wrapper for existing Tenant class to work with MongoDB"""
+    
+    def __init__(self, tenant_data: 'Tenant' = None, **kwargs):
+        if tenant_data:
+            # Initialize from existing Tenant object
+            self._id = tenant_data.tenant_id
+            self.tenant_data = tenant_data
+            self._metadata = BaseMetadata(
+                entity_id=tenant_data.tenant_id,
+                timestamp=tenant_data.created_at,
+                version='1.0.0',
+                created_by=tenant_data.created_by or tenant_data.tenant_id,
+                custom={
+                    'name': tenant_data.name,
+                    'plan': tenant_data.plan,
+                    'created_by': str(tenant_data.created_by) if tenant_data.created_by else None,
+                    'created_at': tenant_data.created_at.isoformat(),
+                    'is_active': tenant_data.is_active,
+                    'settings': tenant_data.settings,
+                    'metadata': tenant_data.metadata
+                }
+            )
+        else:
+            # Initialize from kwargs (loading from MongoDB)
+            self._id = kwargs.get('entity_id') or kwargs.get('tenant_id')
+            custom_data = kwargs.get('custom', kwargs)
+            self._metadata = BaseMetadata(
+                entity_id=self._id,
+                timestamp=datetime.fromisoformat(custom_data.get('created_at', datetime.now(timezone.utc).isoformat())),
+                version=kwargs.get('version', '1.0.0'),
+                created_by=UUID(custom_data.get('created_by')) if custom_data.get('created_by') else self._id,
+                custom=custom_data
+            )
+            # Recreate Tenant object from stored data
+            self.tenant_data = Tenant(
+                tenant_id=self._id,
+                name=custom_data.get('name', 'Unknown'),
+                plan=custom_data.get('plan', 'free'),
+                created_by=UUID(custom_data.get('created_by')) if custom_data.get('created_by') else None,
+                metadata=custom_data.get('metadata', {})
+            )
+            self.tenant_data.created_at = datetime.fromisoformat(custom_data.get('created_at', datetime.now(timezone.utc).isoformat()))
+            self.tenant_data.is_active = custom_data.get('is_active', True)
+            self.tenant_data.settings = custom_data.get('settings', {})
+        
+        self._status = EntityStatus.ACTIVE
+        self._entity_type = 'tenant'
+
+    @property
+    def id(self) -> UUID:
+        return self._id
+
+    @property
+    def metadata(self) -> BaseMetadata:
+        return self._metadata
+
+    @property
+    def status(self) -> EntityStatus:
+        return self._status
+
+    @property
+    def entity_type(self) -> str:
+        return self._entity_type
+
+    def get_tenant(self) -> 'Tenant':
+        """Get the wrapped Tenant object"""
+        return self.tenant_data
+
+    async def initialize(self) -> None:
+        self._status = EntityStatus.ACTIVE
+
+    async def start(self) -> None:
+        self.tenant_data.is_active = True
+        self._status = EntityStatus.ACTIVE
+
+    async def stop(self) -> None:
+        self.tenant_data.is_active = False
+        self._status = EntityStatus.INACTIVE
+
+    def validate(self) -> bool:
+        return bool(self.tenant_data.name and self.tenant_data.name.strip() and 
+                   self.tenant_data.plan in ['free', 'pro', 'enterprise'])
+
+class UserWrapper(IEntity):
+    """Wrapper for existing EnhancedUser class to work with MongoDB"""
+    
+    def __init__(self, user_data: 'EnhancedUser' = None, **kwargs):
+        if user_data:
+            # Initialize from existing EnhancedUser object
+            self._id = user_data.user_id
+            self.user_data = user_data
+            self._metadata = BaseMetadata(
+                entity_id=user_data.user_id,
+                timestamp=user_data.created_at or datetime.now(timezone.utc),
+                version='1.0.0',
+                created_by=user_data.user_id,
+                custom={
+                    'username': user_data.username,
+                    'email': user_data.email,
+                    'password_hash': user_data.password_hash,
+                    'role': user_data.role,
+                    'tenant_id': str(user_data.tenant_id),
+                    'first_name': user_data.first_name,
+                    'last_name': user_data.last_name,
+                    'is_active': user_data.is_active,
+                    'created_at': (user_data.created_at or datetime.now(timezone.utc)).isoformat(),
+                    'last_login': user_data.last_login.isoformat() if user_data.last_login else None,
+                    'metadata': user_data.metadata
+                }
+            )
+        else:
+            # Initialize from kwargs (loading from MongoDB)
+            self._id = kwargs.get('entity_id') or kwargs.get('user_id')
+            custom_data = kwargs.get('custom', kwargs)
+            self._metadata = BaseMetadata(
+                entity_id=self._id,
+                timestamp=datetime.fromisoformat(custom_data.get('created_at', datetime.now(timezone.utc).isoformat())),
+                version=kwargs.get('version', '1.0.0'),
+                created_by=self._id,
+                custom=custom_data
+            )
+            # Recreate EnhancedUser object from stored data
+            self.user_data = EnhancedUser(
+                user_id=self._id,
+                username=custom_data.get('username'),
+                email=custom_data.get('email'),
+                password_hash=custom_data.get('password_hash'),
+                role=custom_data.get('role'),
+                tenant_id=UUID(custom_data.get('tenant_id')),
+                first_name=custom_data.get('first_name'),
+                last_name=custom_data.get('last_name'),
+                is_active=custom_data.get('is_active', True),
+                metadata=custom_data.get('metadata', {}),
+                created_at=datetime.fromisoformat(custom_data.get('created_at', datetime.now(timezone.utc).isoformat())),
+                last_login=datetime.fromisoformat(custom_data.get('last_login')) if custom_data.get('last_login') else None
+            )
+        
+        self._status = EntityStatus.ACTIVE if self.user_data.is_active else EntityStatus.INACTIVE
+        self._entity_type = 'user'
+
+    @property
+    def id(self) -> UUID:
+        return self._id
+
+    @property
+    def metadata(self) -> BaseMetadata:
+        return self._metadata
+
+    @property
+    def status(self) -> EntityStatus:
+        return self._status
+
+    @property
+    def entity_type(self) -> str:
+        return self._entity_type
+
+    def get_user(self) -> 'EnhancedUser':
+        """Get the wrapped EnhancedUser object"""
+        return self.user_data
+
+    async def initialize(self) -> None:
+        self._status = EntityStatus.ACTIVE if self.user_data.is_active else EntityStatus.INACTIVE
+
+    async def start(self) -> None:
+        self.user_data.is_active = True
+        self._status = EntityStatus.ACTIVE
+
+    async def stop(self) -> None:
+        self.user_data.is_active = False
+        self._status = EntityStatus.INACTIVE
+
+    def validate(self) -> bool:
+        import re
+        if len(self.user_data.username) < 3:
+            return False
+        if not self.user_data.username.replace('_', '').replace('-', '').isalnum():
+            return False
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, self.user_data.email):
+            return False
+        if not self.user_data.first_name or not self.user_data.last_name:
+            return False
+        return True

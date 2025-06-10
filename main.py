@@ -28,6 +28,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
 class SimpleConfig:
     """Simple configuration class without circular imports."""
     

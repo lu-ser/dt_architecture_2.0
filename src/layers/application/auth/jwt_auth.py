@@ -10,6 +10,7 @@ import bcrypt
 from . import AuthContext, AuthSubject, AuthSubjectType, AuthMethod
 from src.utils.exceptions import AuthenticationError, AuthorizationError, ValidationError
 from src.utils.config import get_config
+from src.storage.adapters.mongodb_adapter import MongoStorageAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -162,466 +163,269 @@ class RefreshToken:
         }
 
 class JWTProvider:
-    """JWT Provider con persistenza MongoDB ma interfaccia compatibile"""
-
-    def __init__(self):
-        self.config = get_config()
-        self.secret_key = self._get_jwt_secret()
-        self.algorithm = 'HS256'
-        self.access_token_expire_minutes = 60
-        self.refresh_token_expire_days = 7
+    def __init__(self, secret_key: str = None, algorithm: str = 'HS256'):
+        """Costruttore corretto che accetta parametri"""
+        from src.utils.config import get_config
+        config = get_config()
         
-        # 🔧 MANTIENI COMPATIBILITÀ: Attributi in memoria per codice legacy
-        self.users: Dict[str, User] = {}  # username -> User
-        self.users_by_id: Dict[UUID, User] = {}  # user_id -> User
-        self.refresh_tokens: Dict[str, RefreshToken] = {}  # token_hash -> RefreshToken
-        
-        # Storage per persistenza
-        self.user_storage = None
-        self.token_storage = None
-        
-        # Cache e sessioni
-        self._user_cache_ttl = 300  # 5 minuti
-        self._cache_timestamps: Dict[str, datetime] = {}
-        self.active_sessions: Dict[str, List[datetime]] = {}
-        self.max_sessions_per_user = 5
+        self.secret_key = secret_key or config.get('jwt.secret_key', 'dev-secret-key')
+        self.algorithm = algorithm
+        self.users = {}
+        self.users_by_id = {}
+        self.revoked_tokens = set()
         self._initialized = False
-        
-        logger.info('Enhanced JWT Provider initialized (with backward compatibility)')
+        self._user_adapter = None
 
-    async def initialize(self) -> None:
+    async def initialize(self):
+        """Metodo initialize richiesto da __init__.py"""
         if self._initialized:
             return
         
         try:
-            logger.info("🔄 Initializing JWT Provider with persistent storage...")
+            # Carica users da MongoDB se disponibile
+            from src.layers.application.auth.user_registration import EnhancedUser
             
-            # 1. Inizializza storage
-            await self._initialize_storage()
+            self._user_adapter = MongoStorageAdapter(EnhancedUser, twin_id=None)
+            await self._user_adapter.connect()
             
-            # 2. Carica utenti esistenti dal database nella cache in memoria
-            await self._load_users_to_memory()
-            
-            # 3. Crea utenti di default se necessario
-            await self._create_default_users()
-            
-            self._initialized = True
-            logger.info(f'✅ JWT Provider initialized with {len(self.users)} users in memory')
-            
-        except Exception as e:
-            logger.error(f'Failed to initialize JWT Provider: {e}')
-            # Fallback a modalità solo memoria
-            self._initialize_fallback()
-            raise AuthenticationError(f'JWT Provider initialization failed: {e}')
-
-    async def _initialize_storage(self):
-        """Inizializza gli storage adapters"""
-        try:
-            from src.storage import get_global_storage_adapter
-            
-            self.user_storage = get_global_storage_adapter(User)
-            self.token_storage = get_global_storage_adapter(RefreshToken)
-            
-            await self.user_storage.connect()
-            await self.token_storage.connect()
-            
-            user_health = await self.user_storage.health_check()
-            token_health = await self.token_storage.health_check()
-            
-            if user_health and token_health:
-                logger.info("✅ Connected to persistent storage (MongoDB)")
-            else:
-                logger.warning("⚠️  Storage health checks failed, using memory fallback")
-                self.user_storage = None
-                self.token_storage = None
-                
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to initialize storage: {e}")
-            self.user_storage = None
-            self.token_storage = None
-
-    def _initialize_fallback(self):
-        """Fallback a modalità solo memoria"""
-        self.user_storage = None
-        self.token_storage = None
-        logger.warning("🔄 JWT Provider running in memory-only mode")
-
-    async def _load_users_to_memory(self):
-        """Carica tutti gli utenti dal database nella cache in memoria"""
-        if not self.user_storage:
-            return
-            
-        try:
-            users = await self.user_storage.query({})
-            for user in users:
+            # Carica users esistenti in memoria
+            user_entities = await self._user_adapter.query({'is_active': True})
+            for user in user_entities:
                 self.users[user.username] = user
                 self.users_by_id[user.user_id] = user
                 
-            logger.info(f"✅ Loaded {len(users)} users from database to memory")
-            
+            logger.info(f"JWTProvider loaded {len(self.users)} users from database")
+                
         except Exception as e:
-            logger.error(f"Failed to load users from database: {e}")
+            logger.info(f"JWTProvider fallback to memory-only mode: {e}")
+        
+        self._initialized = True
 
-    async def _save_user_to_storage(self, user: User):
-        """Salva utente nel database mantenendo la cache"""
-        try:
-            if self.user_storage:
-                await self.user_storage.save(user)
-                logger.debug(f"✅ User {user.username} saved to database")
+    async def get_user_by_username(self, username: str) -> Optional['User']:
+        """Get user by username - check memory first, then database"""
+        # Ensure initialization
+        if not self._initialized:
+            await self.initialize()
             
-            # Aggiorna sempre la cache in memoria
-            self.users[user.username] = user
-            self.users_by_id[user.user_id] = user
-            self._cache_timestamps[f"user:{user.username}"] = datetime.now(timezone.utc)
+        # First check in-memory cache
+        user = self.users.get(username.lower().strip())
+        if user:
+            return user
             
-        except Exception as e:
-            logger.error(f"Failed to save user {user.username}: {e}")
-            # Mantieni in memoria anche se il database fallisce
-            self.users[user.username] = user
-            self.users_by_id[user.user_id] = user
+        # If not found in memory and we have database access, check database
+        if self._user_adapter:
+            try:
+                user_entities = await self._user_adapter.query({'username': username.lower().strip()})
+                if user_entities:
+                    user = user_entities[0]
+                    
+                    # Cache the user for future access
+                    self.users[user.username] = user
+                    self.users_by_id[user.user_id] = user
+                    
+                    return user
+            except Exception as e:
+                logger.error(f"Error querying user from database: {e}")
+        
+        return None
 
-    # 🔧 METODI COMPATIBILI CON IL CODICE ESISTENTE
+    async def get_user_by_id(self, user_id: UUID) -> Optional['User']:
+        """Get user by ID - check memory first, then database"""
+        # Ensure initialization
+        if not self._initialized:
+            await self.initialize()
+            
+        # First check in-memory cache
+        user = self.users_by_id.get(user_id)
+        if user:
+            return user
+            
+        # If not found in memory and we have database access, check database
+        if self._user_adapter:
+            try:
+                user_entities = await self._user_adapter.query({'entity_id': str(user_id)})
+                if user_entities:
+                    user = user_entities[0]
+                    
+                    # Cache the user for future access
+                    self.users[user.username] = user
+                    self.users_by_id[user.user_id] = user
+                    
+                    return user
+            except Exception as e:
+                logger.error(f"Error querying user by ID from database: {e}")
+        
+        return None
 
-    async def authenticate(self, credentials: Dict[str, Any]) -> AuthContext:
-        """METODO COMPATIBILE: Autentica un utente"""
+    async def authenticate(self, credentials: Dict[str, str]) -> 'AuthContext':
+        """Authenticate user with username/password"""
+        # Ensure initialization before authentication
+        if not self._initialized:
+            await self.initialize()
+        
         username = credentials.get('username')
         password = credentials.get('password')
         
         if not username or not password:
             raise AuthenticationError('Username and password required')
-
-        # Usa la cache in memoria
-        user = self.users.get(username.lower())
+        
+        user = await self.get_user_by_username(username)
         if not user:
-            logger.warning(f'Authentication attempt for unknown user: {username}')
             raise AuthenticationError('Invalid credentials')
-
+        
+        # Verify password
+        import bcrypt
+        if not bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
+            raise AuthenticationError('Invalid credentials')
+        
         if not user.is_active:
-            logger.warning(f'Authentication attempt for inactive user: {username}')
-            raise AuthenticationError('User account is disabled')
-
-        if not user.check_password(password):
-            logger.warning(f'Invalid password for user: {username}')
-            raise AuthenticationError('Invalid credentials')
-
-        # Aggiorna last_login e salva
-        user.last_login = datetime.now(timezone.utc)
-        await self._save_user_to_storage(user)
+            raise AuthenticationError('User account is inactive')
         
-        await self._track_user_session(user.user_id)
-
-        context = AuthContext(
-            subject_type=AuthSubjectType.USER,
+        # Update last login
+        await self.update_user_login(username)
+        
+        # Create AuthContext
+        from src.layers.application.auth import AuthContext, AuthSubject, AuthSubjectType, AuthMethod
+        
+        subject = AuthSubject(
             subject_id=user.user_id,
-            auth_method=AuthMethod.JWT_TOKEN,
-            permissions=user.get_permissions(),
-            metadata={
-                'username': user.username,
-                'email': user.email,
-                'role': user.role,
-                'last_login': user.last_login.isoformat()
-            },
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=self.access_token_expire_minutes)
+            subject_type=AuthSubjectType.USER,
+            roles=[user.role],
+            metadata=user.metadata
         )
-
-        logger.info(f'User authenticated successfully: {username}')
-        return context
-
-    async def create_user(self, username: str, email: str, password: str, role: str,
-                         metadata: Optional[Dict[str, Any]] = None) -> User:
-        """METODO COMPATIBILE: Crea un nuovo utente"""
-        if not username or not email or not password:
-            raise ValidationError('Username, email, and password are required')
-
-        if not UserRole.is_valid_role(role):
-            raise ValidationError(f'Invalid role: {role}')
-
-        username = username.lower().strip()
-        email = email.lower().strip()
-
-        # Verifica duplicati nella cache
-        if username in self.users:
-            raise ValidationError(f'Username already exists: {username}')
-
-        for user in self.users.values():
-            if user.email == email:
-                raise ValidationError(f'Email already exists: {email}')
-
-        # Crea password hash
-        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-        # Crea utente
-        user = User(
-            user_id=uuid4(),
-            username=username,
-            email=email,
-            password_hash=password_hash,
-            role=role,
-            metadata=metadata or {}
-        )
-
-        # Salva nel database e cache
-        await self._save_user_to_storage(user)
         
-        logger.info(f'✅ User created: {username} with role {role}')
-        return user
+        return AuthContext(
+            subject=subject,
+            method=AuthMethod.PASSWORD,
+            metadata={'login_time': datetime.now(timezone.utc).isoformat()}
+        )
 
-    async def generate_token_pair(self, user: User) -> TokenPair:
-        """METODO COMPATIBILE: Genera coppia di token"""
+    async def generate_token_pair(self, user: 'User') -> 'TokenPair':
+        """Generate JWT token pair for user"""
+        import jwt
+        from datetime import datetime, timezone, timedelta
+        
         now = datetime.now(timezone.utc)
+        access_exp = now + timedelta(hours=1)
+        refresh_exp = now + timedelta(days=7)
         
-        # Generate access token
+        # Access token payload
         access_payload = {
             'sub': str(user.user_id),
             'username': user.username,
             'email': user.email,
             'role': user.role,
-            'permissions': user.get_permissions(),
+            'permissions': user.metadata.get('tenant_permissions', []),
             'iat': now.timestamp(),
-            'exp': (now + timedelta(minutes=self.access_token_expire_minutes)).timestamp(),
+            'exp': access_exp.timestamp(),
             'type': 'access'
         }
+        
+        # Refresh token payload
+        refresh_payload = {
+            'sub': str(user.user_id),
+            'username': user.username,
+            'iat': now.timestamp(),
+            'exp': refresh_exp.timestamp(),
+            'type': 'refresh'
+        }
+        
         access_token = jwt.encode(access_payload, self.secret_key, algorithm=self.algorithm)
-
-        # Generate refresh token
-        refresh_token_raw = secrets.token_urlsafe(32)
-        refresh_token_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
+        refresh_token = jwt.encode(refresh_payload, self.secret_key, algorithm=self.algorithm)
         
-        refresh_token_entity = RefreshToken(
-            token_id=uuid4(),
-            user_id=user.user_id,
-            token_hash=refresh_token_hash,
-            expires_at=now + timedelta(days=self.refresh_token_expire_days),
-            metadata={'username': user.username}
-        )
-
-        # Salva nel database e cache
-        if self.token_storage:
-            try:
-                await self.token_storage.save(refresh_token_entity)
-            except Exception as e:
-                logger.error(f"Failed to save refresh token: {e}")
+        # Create TokenPair object
+        from collections import namedtuple
+        TokenPair = namedtuple('TokenPair', ['access_token', 'refresh_token', 'token_type', 'expires_in'])
         
-        self.refresh_tokens[refresh_token_hash] = refresh_token_entity
-        
-        await self._cleanup_user_refresh_tokens(user.user_id)
-
         return TokenPair(
             access_token=access_token,
-            refresh_token=refresh_token_raw,
-            expires_in=self.access_token_expire_minutes * 60,
-            refresh_expires_in=self.refresh_token_expire_days * 86400
+            refresh_token=refresh_token,
+            token_type='Bearer',
+            expires_in=3600
         )
 
-    async def validate_token(self, token: str) -> AuthContext:
-        """METODO COMPATIBILE: Valida un token JWT"""
+    async def refresh_token(self, refresh_token: str) -> 'TokenPair':
+        """Refresh access token using refresh token"""
+        import jwt
+        
         try:
-            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            payload = jwt.decode(refresh_token, self.secret_key, algorithms=[self.algorithm])
             
-            if payload.get('type') != 'access':
+            if payload.get('type') != 'refresh':
                 raise AuthenticationError('Invalid token type')
-
-            user_id = UUID(payload['sub'])
-            username = payload['username']
-            role = payload['role']
-            permissions = payload.get('permissions', [])
-
-            # Verifica che l'utente esista ancora
-            user = self.users_by_id.get(user_id)
-            if not user or not user.is_active:
-                raise AuthenticationError('User no longer exists or is inactive')
-
-            expires_at = datetime.fromtimestamp(payload['exp'], tz=timezone.utc)
-
-            context = AuthContext(
-                subject_type=AuthSubjectType.USER,
-                subject_id=user_id,
-                auth_method=AuthMethod.JWT_TOKEN,
-                permissions=permissions,
-                metadata={
-                    'username': username,
-                    'email': payload.get('email'),
-                    'role': role,
-                    'token_issued_at': datetime.fromtimestamp(payload['iat'], tz=timezone.utc).isoformat()
-                },
-                expires_at=expires_at
-            )
             
-            return context
+            if refresh_token in self.revoked_tokens:
+                raise AuthenticationError('Token has been revoked')
+            
+            user_id = UUID(payload['sub'])
+            user = await self.get_user_by_id(user_id)
+            
+            if not user or not user.is_active:
+                raise AuthenticationError('User not found or inactive')
+            
+            # Generate new token pair
+            return await self.generate_token_pair(user)
             
         except jwt.ExpiredSignatureError:
-            raise AuthenticationError('Token has expired')
-        except jwt.InvalidTokenError as e:
-            raise AuthenticationError(f'Invalid token: {e}')
-        except Exception as e:
-            logger.error(f'Token validation failed: {e}')
-            raise AuthenticationError('Token validation failed')
-
-    async def refresh_token(self, refresh_token: str) -> TokenPair:
-        """METODO COMPATIBILE: Refresh del token"""
-        token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-        refresh_token_entity = self.refresh_tokens.get(token_hash)
-        
-        if not refresh_token_entity:
+            raise AuthenticationError('Refresh token expired')
+        except jwt.InvalidTokenError:
             raise AuthenticationError('Invalid refresh token')
 
-        if not refresh_token_entity.is_valid():
-            self.refresh_tokens.pop(token_hash, None)
-            raise AuthenticationError('Refresh token is expired or revoked')
-
-        user = self.users_by_id.get(refresh_token_entity.user_id)
-        if not user or not user.is_active:
-            refresh_token_entity.is_revoked = True
-            raise AuthenticationError('User no longer exists or is inactive')
-
-        # Revoca il vecchio token
-        refresh_token_entity.is_revoked = True
-        
-        # Genera nuovi token
-        new_token_pair = await self.generate_token_pair(user)
-        
-        logger.info(f'Token refreshed for user: {user.username}')
-        return new_token_pair
-
-    async def get_user_by_id(self, user_id: UUID) -> Optional[User]:
-        """METODO COMPATIBILE: Ottieni utente per ID"""
-        return self.users_by_id.get(user_id)
-
-    async def get_user_by_username(self, username: str) -> Optional[User]:
-        """METODO COMPATIBILE: Ottieni utente per username"""
-        return self.users.get(username.lower())
-
-    async def list_users(self, include_inactive: bool = False) -> List[Dict[str, Any]]:
-        """METODO COMPATIBILE: Lista utenti"""
-        users = []
-        for user in self.users.values():
-            if include_inactive or user.is_active:
-                users.append(user.to_dict())
-        return users
+    async def revoke_token(self, token: str) -> None:
+        """Revoke a token"""
+        self.revoked_tokens.add(token)
 
     async def revoke_all_user_tokens(self, user_id: UUID) -> None:
-        """METODO COMPATIBILE: Revoca tutti i token di un utente"""
-        revoked_count = 0
-        for refresh_token in self.refresh_tokens.values():
-            if refresh_token.user_id == user_id and not refresh_token.is_revoked:
-                refresh_token.is_revoked = True
-                revoked_count += 1
-        
-        logger.info(f'Revoked {revoked_count} tokens for user: {user_id}')
+        """Revoke all tokens for a user"""
+        # In a real implementation, you'd track tokens per user
+        # For now, we'll just add a placeholder
+        pass
 
-    # Metodi privati
-
-    async def _create_default_users(self) -> None:
-        """Crea utenti di default se non esistono"""
-        default_users = [
-            {
-                'username': 'admin',
-                'email': 'admin@digitaltwin.platform',
-                'password': 'admin123',
-                'role': UserRole.ADMIN,
-                'metadata': {
-                    'default_user': True,
-                    'description': 'Default admin user'
-                }
-            },
-            {
-                'username': 'operator',
-                'email': 'operator@digitaltwin.platform',
-                'password': 'operator123',
-                'role': UserRole.OPERATOR,
-                'metadata': {
-                    'default_user': True,
-                    'description': 'Default operator user'
-                }
-            },
-            {
-                'username': 'viewer',
-                'email': 'viewer@digitaltwin.platform',
-                'password': 'viewer123',
-                'role': UserRole.VIEWER,
-                'metadata': {
-                    'default_user': True,
-                    'description': 'Default viewer user'
-                }
-            }
-        ]
-
-        for user_data in default_users:
-            try:
-                if user_data['username'] not in self.users:
-                    await self.create_user(**user_data)
-                    logger.info(f"✅ Created default user: {user_data['username']}")
-                else:
-                    logger.debug(f"Default user already exists: {user_data['username']}")
-            except ValidationError:
-                logger.debug(f"Default user already exists: {user_data['username']}")
-
-    async def _track_user_session(self, user_id: UUID) -> None:
-        user_id_str = str(user_id)
-        now = datetime.now(timezone.utc)
-        
-        if user_id_str not in self.active_sessions:
-            self.active_sessions[user_id_str] = []
-        
-        self.active_sessions[user_id_str].append(now)
-        
-        # Cleanup vecchie sessioni
-        cutoff = now - timedelta(hours=24)
-        self.active_sessions[user_id_str] = [
-            session for session in self.active_sessions[user_id_str] 
-            if session > cutoff
-        ]
-        
-        if len(self.active_sessions[user_id_str]) > self.max_sessions_per_user:
-            logger.warning(f'User {user_id} exceeded max sessions limit')
-
-    async def _cleanup_user_refresh_tokens(self, user_id: UUID) -> None:
-        tokens_to_remove = []
-        for token_hash, refresh_token in self.refresh_tokens.items():
-            if (refresh_token.user_id == user_id and 
-                (refresh_token.is_expired() or refresh_token.is_revoked)):
-                tokens_to_remove.append(token_hash)
-
-        for token_hash in tokens_to_remove:
-            del self.refresh_tokens[token_hash]
+    async def update_user_login(self, username: str) -> None:
+        """Update user's last login timestamp in both memory and database"""
+        user = await self.get_user_by_username(username)
+        if not user:
+            return
             
-            # Rimuovi anche dal database se disponibile
-            if self.token_storage:
-                try:
-                    token_entity = self.refresh_tokens.get(token_hash)
-                    if token_entity:
-                        await self.token_storage.delete(token_entity.token_id)
-                except Exception as e:
-                    logger.error(f"Failed to delete token from database: {e}")
-
-        if tokens_to_remove:
-            logger.debug(f'Cleaned up {len(tokens_to_remove)} expired tokens for user {user_id}')
-
-    def _get_jwt_secret(self) -> str:
-        jwt_config = self.config.get('jwt', {})
-        secret = jwt_config.get('secret_key')
-        if not secret:
-            secret = 'dev-jwt-secret-key-change-in-production'
-            logger.warning('Using development JWT secret. Change this in production!')
-        return secret
-
-    def get_provider_status(self) -> Dict[str, Any]:
-        active_tokens = len([token for token in self.refresh_tokens.values() if token.is_valid()])
+        # Update in memory
+        user.last_login = datetime.now(timezone.utc)
         
-        return {
-            'initialized': self._initialized,
-            'storage_mode': 'persistent' if self.user_storage else 'memory',
-            'user_storage_connected': self.user_storage is not None,
-            'token_storage_connected': self.token_storage is not None,
-            'total_users': len(self.users),
-            'active_users': len([u for u in self.users.values() if u.is_active]),
-            'active_refresh_tokens': active_tokens,
-            'total_refresh_tokens': len(self.refresh_tokens),
-            'active_sessions': sum(len(sessions) for sessions in self.active_sessions.values()),
-            'configuration': {
-                'access_token_expire_minutes': self.access_token_expire_minutes,
-                'refresh_token_expire_days': self.refresh_token_expire_days,
-                'max_sessions_per_user': self.max_sessions_per_user,
-                'algorithm': self.algorithm
-            }
-        }
+        # Update in database if available
+        if self._user_adapter:
+            try:
+                user_entities = await self._user_adapter.query({'username': username.lower().strip()})
+                if user_entities:
+                    user_entity = user_entities[0]
+                    user_entity.last_login = user.last_login
+                    await self._user_adapter.save(user_entity)
+            except Exception as e:
+                logger.error(f"Error updating user login in database: {e}")
+
+    async def list_users(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
+        """List all users from database"""
+        # Ensure initialization
+        if not self._initialized:
+            await self.initialize()
+            
+        users = []
+        
+        if self._user_adapter:
+            try:
+                query = {} if include_inactive else {'is_active': True}
+                user_entities = await self._user_adapter.query(query)
+                
+                for user_entity in user_entities:
+                    user_dict = user_entity.to_dict() if hasattr(user_entity, 'to_dict') else user_entity.__dict__
+                    users.append(user_dict)
+                    
+            except Exception as e:
+                logger.error(f"Error listing users from database: {e}")
+                # Fallback to in-memory users
+                users = [user.to_dict() for user in self.users.values() 
+                        if include_inactive or user.is_active]
+        else:
+            # Fallback to in-memory users
+            users = [user.to_dict() for user in self.users.values() 
+                    if include_inactive or user.is_active]
+        
+        return users

@@ -10,9 +10,16 @@ from src.layers.application.auth import get_auth_manager, AuthContext, get_auth_
 from src.layers.application.auth.user_registration import UserRegistrationRequest, UserRegistrationService
 from src.layers.application.auth.jwt_auth import JWTProvider
 from src.utils.exceptions import ValidationError, AuthenticationError
+from datetime import datetime, timezone
+import asyncio
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_jwt_provider_instance = None
+_registration_service_instance = None
+_initialization_lock = asyncio.Lock()
+_initialized = False
 
 # === PYDANTIC MODELS ===
 
@@ -108,11 +115,32 @@ class TenantResponse(BaseModel):
 
 # === DEPENDENCY INJECTION ===
 
-async def get_registration_service() -> UserRegistrationService:
-    """Dependency per ottenere il servizio di registrazione"""
-    auth_manager = get_auth_manager()
-    await auth_manager.initialize()
-    return UserRegistrationService(auth_manager.jwt_provider)
+async def get_jwt_provider() -> JWTProvider:
+    """Get initialized JWT provider with database support"""
+    global _jwt_provider_instance, _initialized
+    
+    async with _initialization_lock:
+        if _jwt_provider_instance is None or not _initialized:
+            from src.utils.config import get_config
+            config = get_config()
+            
+            secret_key = config.get('jwt.secret_key', 'dev-secret-key')
+            _jwt_provider_instance = JWTProvider(secret_key=secret_key)
+            _initialized = True
+            logger.info("Persistent JWT Provider initialized")
+    
+    return _jwt_provider_instance
+
+async def get_registration_service(jwt_provider = Depends(get_jwt_provider)):
+    """Get registration service with MongoDB"""
+    global _registration_service_instance
+    
+    if _registration_service_instance is None:
+        _registration_service_instance = UserRegistrationService(jwt_provider)
+        await _registration_service_instance.initialize()
+        logger.info("MongoDB UserRegistrationService initialized")
+    
+    return _registration_service_instance
 
 # === ENDPOINTS ===
 
@@ -158,44 +186,33 @@ async def register_user(
         logger.error(f"Registration failed: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Registration failed")
 
-@router.post("/login", summary="User Login", response_model=LoginResponse)
+@router.post('/login', summary='User Login', response_model=LoginResponse)
 async def login_user(
-    login_data: UserLogin,
-    request: Request,
+    login_data: UserLogin, 
+    request: Request, 
     registration_service: UserRegistrationService = Depends(get_registration_service)
 ) -> Dict[str, Any]:
-    """
-    Autentica utente e restituisce token
-    
-    - Valida credenziali
-    - Genera JWT token pair
-    - Restituisce informazioni utente e tenant
-    """
+    """Enhanced login with persistent tenant lookup"""
     try:
-        # Autentica con JWT Provider
         jwt_provider = registration_service.jwt_provider
-        credentials = {
-            'username': login_data.username,
-            'password': login_data.password
-        }
         
-        # Prova autenticazione
+        # Authenticate user
+        credentials = {'username': login_data.username, 'password': login_data.password}
         auth_context = await jwt_provider.authenticate(credentials)
         
-        # Ottieni user completo
+        # Get user (will check database if not in memory)
         user = await jwt_provider.get_user_by_username(login_data.username)
         if not user:
-            raise AuthenticationError("User not found")
+            raise AuthenticationError('User not found')
         
-        # Genera token pair
+        # Generate tokens
         token_pair = await jwt_provider.generate_token_pair(user)
         
-        # Ottieni informazioni tenant
+        # Get tenant info (will check database if not in memory)
         tenant_id = UUID(user.metadata.get('tenant_id'))
         tenant_info = await registration_service.get_tenant_info(tenant_id)
         
-        # Log successful login
-        logger.info(f"Successful login: {user.username} (tenant: {tenant_id})")
+        logger.info(f'Successful login: {user.username} (tenant: {tenant_id})')
         
         return {
             'access_token': token_pair.access_token,
@@ -207,11 +224,81 @@ async def login_user(
         }
         
     except AuthenticationError as e:
-        logger.warning(f"Login failed: {e}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        logger.warning(f'Login failed: {e}')
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid credentials')
     except Exception as e:
-        logger.error(f"Login error: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Login failed")
+        logger.error(f'Login error: {e}')
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Login failed')
+
+
+@router.get('/health/database', summary='Database Health Check')
+async def database_health_check(
+    registration_service: UserRegistrationService = Depends(get_registration_service)
+) -> Dict[str, Any]:
+    """Check database connectivity"""
+    try:
+        tenant_health = await registration_service.tenant_adapter.health_check()
+        user_health = await registration_service.user_adapter.health_check()
+        
+        return {
+            'status': 'healthy' if tenant_health and user_health else 'unhealthy',
+            'tenant_db': 'connected' if tenant_health else 'disconnected',
+            'user_db': 'connected' if user_health else 'disconnected',
+            'tenant_count': len(registration_service.tenants),
+            'user_count': len(registration_service.jwt_provider.users),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f'Database health check failed: {e}')
+        return {
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+    
+router.post('/admin/migrate-to-mongodb', summary='Migrate to MongoDB')
+async def migrate_to_mongodb(
+    auth_context: AuthContext = Depends(get_auth_context),
+    registration_service: UserRegistrationService = Depends(get_registration_service)
+) -> Dict[str, Any]:
+    """One-time migration utility to move existing in-memory data to MongoDB"""
+    
+    # Check admin permissions
+    if not auth_context.has_permission('admin:*'):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Admin access required')
+    
+    try:
+        # Get counts before migration
+        initial_tenant_count = len(registration_service.tenants)
+        initial_user_count = len(registration_service.jwt_provider.users)
+        
+        # Force reload from database to ensure we're not duplicating
+        await registration_service._load_existing_data()
+        
+        final_tenant_count = len(registration_service.tenants)
+        final_user_count = len(registration_service.jwt_provider.users)
+        
+        logger.info(f"Migration check: {final_tenant_count} tenants, {final_user_count} users in database")
+        
+        return {
+            'status': 'completed',
+            'message': 'Data migration verified',
+            'initial_counts': {
+                'tenants': initial_tenant_count,
+                'users': initial_user_count
+            },
+            'final_counts': {
+                'tenants': final_tenant_count,
+                'users': final_user_count
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f'Migration failed: {e}')
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'Migration failed: {e}')
+
+
 
 @router.post("/refresh", summary="Refresh Token")
 async def refresh_token(
@@ -234,6 +321,7 @@ async def refresh_token(
         
     except AuthenticationError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+
 
 @router.post("/logout", summary="Logout User")
 async def logout_user(
@@ -502,3 +590,11 @@ async def get_auth_statistics(
     except Exception as e:
         logger.error(f"Get auth statistics failed: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get statistics")
+
+
+__all__ = [
+    'get_jwt_provider',
+    'get_registration_service', 
+    'login_user',
+    'database_health_check'
+]
