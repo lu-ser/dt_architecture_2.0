@@ -29,7 +29,7 @@ class EntityStatus(Enum):
 
 
 class BaseMetadata:
-    """Base metadata structure for all entities."""
+    """Base metadata structure for all entities - con supporto .get()"""
     
     def __init__(
         self,
@@ -44,6 +44,23 @@ class BaseMetadata:
         self.version = version
         self.created_by = created_by
         self.custom = custom or {}
+    
+    # ✅ AGGIUNGI QUESTO METODO
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get value from custom metadata (compatibility with dict.get())"""
+        return self.custom.get(key, default)
+    
+    # ✅ AGGIUNGI ANCHE QUESTO per essere sicuri
+    def __getitem__(self, key: str) -> Any:
+        """Allow dict-like access to custom metadata"""
+        return self.custom[key]
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Prevent direct assignment with helpful error"""
+        raise TypeError(
+            f"BaseMetadata object does not support item assignment. "
+            f"Use entity.update_metadata('{key}', {value}) instead."
+        )
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert metadata to dictionary representation."""

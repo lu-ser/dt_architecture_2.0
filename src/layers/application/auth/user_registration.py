@@ -19,14 +19,15 @@ logger = logging.getLogger(__name__)
 class Tenant(IEntity):
     """Classe Tenant modificata per supportare MongoDB"""
     
-    def __init__(self, tenant_id: UUID, name: str, plan: str = 'free', created_by: UUID = None, metadata: Optional[Dict[str, Any]] = None):
+    def __init__(self, tenant_id: UUID, name: str, plan: str = 'free', 
+                 created_by: UUID = None, metadata: Optional[Dict[str, Any]] = None):
         self.tenant_id = tenant_id
         self.name = name
         self.plan = plan
         self.created_by = created_by
         self.created_at = datetime.now(timezone.utc)
         self.is_active = True
-        self.custom_metadata = metadata or {}  # ← RINOMINATO qui
+        self.custom_metadata = metadata or {}
         self.settings = self._get_plan_limits(plan)
         
         # Implementazione IEntity
@@ -73,18 +74,38 @@ class Tenant(IEntity):
         self.is_active = False
 
     async def terminate(self) -> None:
-        """Terminate the tenant"""
         self.is_active = False
         self._status = EntityStatus.INACTIVE
 
     def validate(self) -> bool:
-        return bool(self.name and self.plan in ['free', 'pro', 'enterprise'])
+        import re
+        if len(self.username) < 3:
+            return False
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(email_pattern, self.email))
+    
 
-    def _get_plan_limits(self, plan: str) -> Dict[str, int]:
+    def _get_plan_limits(self, plan: str) -> Dict[str, Any]:
+        """Get limits based on plan"""
         limits = {
-            'free': {'max_twins': 5, 'max_users': 3, 'storage_gb': 1},
-            'pro': {'max_twins': 50, 'max_users': 25, 'storage_gb': 100},
-            'enterprise': {'max_twins': -1, 'max_users': -1, 'storage_gb': -1}
+            'free': {
+                'max_users': 5,
+                'max_digital_twins': 3,
+                'max_storage_gb': 1,
+                'api_calls_per_month': 10000
+            },
+            'pro': {
+                'max_users': 50,
+                'max_digital_twins': 25,
+                'max_storage_gb': 100,
+                'api_calls_per_month': 100000
+            },
+            'enterprise': {
+                'max_users': -1,  # unlimited
+                'max_digital_twins': -1,
+                'max_storage_gb': -1,
+                'api_calls_per_month': -1
+            }
         }
         return limits.get(plan, limits['free'])
 
@@ -97,6 +118,7 @@ class Tenant(IEntity):
         return max_users == -1 or current_count < max_users
 
     def to_dict(self) -> Dict[str, Any]:
+        """Metodo to_dict corretto per Tenant"""
         return {
             'tenant_id': str(self.tenant_id),
             'name': self.name,
@@ -105,7 +127,7 @@ class Tenant(IEntity):
             'created_at': self.created_at.isoformat(),
             'is_active': self.is_active,
             'settings': self.settings,
-            'metadata': self.custom_metadata  # ← AGGIORNATO qui
+            'metadata': self.custom_metadata
         }
 
 class UserRegistrationRequest:
@@ -178,8 +200,7 @@ class EnhancedUser(User, IEntity):
             'registration_completed': True
         })
         
-        # NON chiamare super().__init__() per evitare conflitti
-        # Inizializza manualmente tutti gli attributi necessari
+        # Inizializza tutti gli attributi dell'utente
         self.user_id = user_id
         self.username = username
         self.email = email
@@ -188,11 +209,10 @@ class EnhancedUser(User, IEntity):
         self.is_active = is_active
         self.created_at = created_at or datetime.now(timezone.utc)
         self.last_login = last_login
-        
         self.tenant_id = tenant_id
         self.first_name = first_name
         self.last_name = last_name
-        self.custom_metadata = enhanced_metadata  # ← RINOMINATO per evitare conflitti
+        self.custom_metadata = enhanced_metadata  # ← Questo è il dizionario modificabile
         
         # Implementazione IEntity
         self._entity_type = 'user'
@@ -205,6 +225,21 @@ class EnhancedUser(User, IEntity):
         )
         self._status = EntityStatus.ACTIVE if is_active else EntityStatus.INACTIVE
 
+    def update_metadata(self, key: str, value: Any) -> None:
+        """Aggiorna metadata in modo sicuro"""
+        # Aggiorna il dizionario locale
+        self.custom_metadata[key] = value
+        
+        # Ricrea BaseMetadata con i nuovi dati
+        updated_custom = self.custom_metadata.copy()
+        self._metadata = BaseMetadata(
+            entity_id=self.user_id,
+            timestamp=self.created_at,
+            version='1.0.0',
+            created_by=self.user_id,
+            custom=updated_custom
+        )
+
     @property
     def id(self) -> UUID:
         return self.user_id
@@ -216,7 +251,12 @@ class EnhancedUser(User, IEntity):
     @property
     def status(self) -> EntityStatus:
         return self._status
-
+    
+    @property 
+    def metadata_dict(self) -> Dict[str, Any]:
+        """Restituisce metadata come dizionario modificabile"""
+        return self.custom_metadata
+    
     @property
     def entity_type(self) -> str:
         return self._entity_type
@@ -254,7 +294,7 @@ class EnhancedUser(User, IEntity):
             'is_active': self.is_active,
             'last_login': self.last_login.isoformat() if self.last_login else None,
             'created_at': self.created_at.isoformat(),
-            'metadata': self.custom_metadata  # ← AGGIORNATO
+            'metadata': self.custom_metadata
         }
         
         if include_sensitive:
@@ -264,7 +304,7 @@ class EnhancedUser(User, IEntity):
 
 
 class UserRegistrationService:
-    """Classe UserRegistrationService modificata per MongoDB persistence"""
+    """Classe UserRegistrationService corretta"""
 
     def __init__(self, jwt_provider: JWTProvider):
         self.jwt_provider = jwt_provider
@@ -282,16 +322,18 @@ class UserRegistrationService:
         self._initialized = False
 
     async def initialize(self):
-        """Inizializza connessioni MongoDB"""
+        """Inizializza connessioni MongoDB - VERSIONE CORRETTA"""
         if self._initialized:
             return
             
+        # Connetti agli adapter MongoDB
         await self.tenant_adapter.connect()
         await self.user_adapter.connect()
         
         # Carica dati esistenti in memoria
         await self._load_from_database()
         
+        # Marca come inizializzato
         self._initialized = True
         logger.info("UserRegistrationService initialized with MongoDB")
 
@@ -348,58 +390,22 @@ class UserRegistrationService:
         else:
             return await self._complete_registration(user, tenant)
 
-    async def get_tenant_info(self, tenant_id: UUID) -> Dict[str, Any]:
-        """Get tenant con fallback al database"""
-        if not self._initialized:
-            await self.initialize()
-            
-        # Prima cerca in memoria
-        tenant = self.tenants.get(tenant_id)
+    async def _setup_tenant_owner_permissions(self, user: EnhancedUser, tenant: Tenant) -> None:
+        """VERSIONE CORRETTA - usa custom_metadata invece di metadata"""
         
-        # Se non trovato, cerca nel database
-        if not tenant:
-            try:
-                tenant_entities = await self.tenant_adapter.query({'entity_id': str(tenant_id)})
-                if tenant_entities:
-                    tenant = tenant_entities[0]
-                    self.tenants[tenant_id] = tenant  # Metti in cache
-                else:
-                    raise ValidationError('Tenant not found')
-            except Exception as e:
-                logger.error(f"Error getting tenant: {e}")
-                raise ValidationError('Tenant not found')
+        # ✅ FIX: Usa custom_metadata invece di metadata
+        user.custom_metadata['tenant_permissions'] = [
+            'tenant:admin', 'digital_twin:*', 'service:*', 
+            'replica:*', 'user:manage', 'billing:manage'
+        ]
         
-        user_count = await self._count_tenant_users(tenant_id)
-        twin_count = await self._count_tenant_digital_twins(tenant_id)
+        # Aggiungi altre informazioni
+        user.custom_metadata['is_tenant_owner'] = True
+        user.custom_metadata['permissions_setup_completed'] = True
+        user.custom_metadata['permissions_setup_at'] = datetime.now(timezone.utc).isoformat()
         
-        return {
-            **tenant.to_dict(),
-            'usage': {
-                'users': user_count,
-                'digital_twins': twin_count,
-                'storage_used_gb': 0
-            },
-            'limits': {
-                'users_remaining': tenant.settings['max_users'] - user_count if tenant.settings['max_users'] != -1 else -1,
-                'twins_remaining': tenant.settings['max_digital_twins'] - twin_count if tenant.settings['max_digital_twins'] != -1 else -1
-            }
-        }
-
-    async def _username_exists(self, username: str) -> bool:
-        """Check username in database"""
-        try:
-            user_entities = await self.user_adapter.query({'username': username.lower().strip()})
-            return len(user_entities) > 0
-        except:
-            return username.lower().strip() in self.jwt_provider.users
-
-    async def _email_exists(self, email: str) -> bool:
-        """Check email in database"""
-        try:
-            user_entities = await self.user_adapter.query({'email': email.lower().strip()})
-            return len(user_entities) > 0
-        except:
-            return any(user.email == email.lower().strip() for user in self.jwt_provider.users.values())
+        # Salva le modifiche
+        await self.user_adapter.save(user)
 
     async def _create_tenant(self, registration: UserRegistrationRequest) -> Tenant:
         """Crea tenant e salva su MongoDB"""
@@ -461,15 +467,19 @@ class UserRegistrationService:
         logger.info(f'Created user {user_id} for tenant {tenant.tenant_id}')
         return user
 
-    # Mantieni tutti gli altri metodi esistenti...
-    async def _setup_tenant_owner_permissions(self, user: EnhancedUser, tenant: Tenant) -> None:
-        user.metadata['tenant_permissions'] = [
-            'tenant:admin', 'digital_twin:*', 'service:*', 
-            'replica:*', 'user:manage', 'billing:manage'
-        ]
-
     async def _complete_registration(self, user: EnhancedUser, tenant: Tenant) -> Dict[str, Any]:
+        """Completa registrazione"""
+        
+        # Aggiorna metadata di completamento usando custom_metadata
+        user.custom_metadata['registration_completed_at'] = datetime.now(timezone.utc).isoformat()
+        user.custom_metadata['onboarding_completed'] = False
+        
+        # Salva l'utente aggiornato
+        await self.user_adapter.save(user)
+        
+        # Genera token
         token_pair = await self.jwt_provider.generate_token_pair(user)
+        
         return {
             'status': 'registration_complete',
             'message': 'Welcome to Digital Twin Platform!',
@@ -480,6 +490,59 @@ class UserRegistrationService:
             'tenant': tenant.to_dict(),
             'tokens': token_pair.to_dict()
         }
+
+    async def get_tenant_info(self, tenant_id: UUID) -> Dict[str, Any]:
+        """Get tenant con fallback al database"""
+        if not self._initialized:
+            await self.initialize()
+            
+        # Prima cerca in memoria
+        tenant = self.tenants.get(tenant_id)
+        
+        # Se non trovato, cerca nel database
+        if not tenant:
+            try:
+                tenant_entities = await self.tenant_adapter.query({'entity_id': str(tenant_id)})
+                if tenant_entities:
+                    tenant = tenant_entities[0]
+                    self.tenants[tenant_id] = tenant  # Metti in cache
+                else:
+                    raise ValidationError('Tenant not found')
+            except Exception as e:
+                logger.error(f"Error getting tenant: {e}")
+                raise ValidationError('Tenant not found')
+        
+        user_count = await self._count_tenant_users(tenant_id)
+        twin_count = await self._count_tenant_digital_twins(tenant_id)
+        
+        return {
+            **tenant.to_dict(),
+            'usage': {
+                'users': user_count,
+                'digital_twins': twin_count,
+                'storage_used_gb': 0
+            },
+            'limits': {
+                'users_remaining': tenant.settings['max_users'] - user_count if tenant.settings['max_users'] != -1 else -1,
+                'twins_remaining': tenant.settings['max_digital_twins'] - twin_count if tenant.settings['max_digital_twins'] != -1 else -1
+            }
+        }
+
+    async def _username_exists(self, username: str) -> bool:
+        """Check username in database"""
+        try:
+            user_entities = await self.user_adapter.query({'username': username.lower().strip()})
+            return len(user_entities) > 0
+        except:
+            return username.lower().strip() in self.jwt_provider.users
+
+    async def _email_exists(self, email: str) -> bool:
+        """Check email in database"""
+        try:
+            user_entities = await self.user_adapter.query({'email': email.lower().strip()})
+            return len(user_entities) > 0
+        except:
+            return any(user.email == email.lower().strip() for user in self.jwt_provider.users.values())
 
     async def _create_verification_token(self, user: EnhancedUser) -> str:
         return secrets.token_urlsafe(32)
@@ -497,7 +560,6 @@ class UserRegistrationService:
 
     async def _count_tenant_digital_twins(self, tenant_id: UUID) -> int:
         return 0
-
 
 import secrets
 import jwt
@@ -915,12 +977,10 @@ class TenantWrapper(IEntity):
         self._status = EntityStatus.ACTIVE
 
     async def start(self) -> None:
-        self.tenant_data.is_active = True
-        self._status = EntityStatus.ACTIVE
+        self.is_active = True
 
     async def stop(self) -> None:
-        self.tenant_data.is_active = False
-        self._status = EntityStatus.INACTIVE
+        self.is_active = False
 
     def validate(self) -> bool:
         return bool(self.tenant_data.name and self.tenant_data.name.strip() and 

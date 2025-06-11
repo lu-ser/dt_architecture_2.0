@@ -37,7 +37,8 @@ class AuthMethod(Enum):
     """Authentication methods supported."""
     JWT_TOKEN = "jwt_token"
     API_KEY = "api_key"
-    SYSTEM_TOKEN  = 'system_token'
+    SYSTEM_TOKEN = 'system_token'
+    PASSWORD = "password"
 
 
 class AuthContext:

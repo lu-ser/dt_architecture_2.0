@@ -22,34 +22,98 @@ class EntitySerializer:
     
     @staticmethod
     def entity_to_document(entity: IEntity) -> Dict[str, Any]:
-        """Convert entity to MongoDB document."""
+        """Convert entity to MongoDB document with proper type detection."""
         try:
-            # Use entity's to_dict method if available
-            if hasattr(entity, 'to_dict'):
+            # Identificazione sicura del tipo di entità
+            entity_class_name = entity.__class__.__name__
+            
+            # Gestione specifica per tipo di entità
+            if entity_class_name == 'Tenant' or 'Tenant' in str(type(entity)):
+                doc = EntitySerializer._serialize_tenant(entity)
+            elif entity_class_name == 'EnhancedUser' or hasattr(entity, 'user_id'):
+                doc = EntitySerializer._serialize_user(entity)
+            elif hasattr(entity, 'to_dict'):
+                # Fallback per altre entità che hanno to_dict
                 doc = entity.to_dict()
             else:
-                # Fallback: serialize key attributes
-                doc = {
-                    'id': str(entity.id),
-                    'metadata': entity.metadata.to_dict() if entity.metadata else {},
-                    'status': entity.status.value if hasattr(entity.status, 'value') else str(entity.status),
-                    'created_at': datetime.now(timezone.utc).isoformat(),
-                    'entity_type': entity.__class__.__name__
-                }
+                # Fallback generico
+                doc = EntitySerializer._serialize_generic_entity(entity)
             
-            # Ensure _id field for MongoDB
+            # Campi comuni MongoDB
             doc['_id'] = str(entity.id)
             doc['entity_id'] = str(entity.id)
+            doc['entity_type'] = entity_class_name
+            doc['serialized_at'] = datetime.now(timezone.utc).isoformat()
             
-            # Convert UUIDs to strings
+            # Convert UUIDs to strings per MongoDB
             doc = EntitySerializer._convert_uuids_to_strings(doc)
             
             return doc
             
         except Exception as e:
-            logger.error(f"Failed to serialize entity {entity.id}: {e}")
+            logger.error(f"Failed to serialize entity {entity.id} of type {type(entity)}: {e}")
             raise DataPersistenceError(f"Entity serialization failed: {e}")
     
+
+    @staticmethod
+    def _serialize_user(entity) -> Dict[str, Any]:
+        """Serializza specificamente oggetti User/EnhancedUser"""
+        try:
+            # Se ha to_dict, usalo
+            if hasattr(entity, 'to_dict'):
+                return entity.to_dict()
+            
+            # Altrimenti serializza manualmente
+            return {
+                'user_id': str(entity.user_id),
+                'username': entity.username,
+                'email': entity.email,
+                'password_hash': entity.password_hash,
+                'role': entity.role,
+                'tenant_id': str(entity.tenant_id),
+                'first_name': entity.first_name,
+                'last_name': entity.last_name,
+                'is_active': entity.is_active,
+                'created_at': entity.created_at.isoformat(),
+                'last_login': entity.last_login.isoformat() if entity.last_login else None,
+                'metadata': getattr(entity, 'custom_metadata', {})
+            }
+        except Exception as e:
+            logger.error(f"Failed to serialize User: {e}")
+            raise
+
+    @staticmethod
+    def _serialize_tenant(entity) -> Dict[str, Any]:
+        """Serializza specificamente oggetti Tenant"""
+        try:
+            # Se ha to_dict, usalo
+            if hasattr(entity, 'to_dict'):
+                return entity.to_dict()
+            
+            # Altrimenti serializza manualmente
+            return {
+                'tenant_id': str(entity.tenant_id),
+                'name': entity.name,
+                'plan': entity.plan,
+                'created_by': str(entity.created_by) if entity.created_by else None,
+                'created_at': entity.created_at.isoformat(),
+                'is_active': entity.is_active,
+                'settings': getattr(entity, 'settings', {}),
+                'metadata': getattr(entity, 'custom_metadata', {})
+            }
+        except Exception as e:
+            logger.error(f"Failed to serialize Tenant: {e}")
+            raise
+    @staticmethod
+    def _serialize_generic_entity(entity) -> Dict[str, Any]:
+        """Serializza entità generiche"""
+        return {
+            'id': str(entity.id),
+            'metadata': entity.metadata.to_dict() if hasattr(entity.metadata, 'to_dict') else {},
+            'status': entity.status.value if hasattr(entity.status, 'value') else str(entity.status),
+            'entity_type': entity.__class__.__name__
+        }
+
     @staticmethod
     def document_to_entity_dict(doc: Dict[str, Any], entity_class: Type[T]) -> Dict[str, Any]:
         """Convert MongoDB document back to entity dict."""
@@ -259,6 +323,7 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             raise DataPersistenceError(f"Save operation failed: {e}")
     
     async def load(self, entity_id: UUID) -> T:
+        """Load entity from MongoDB and deserialize to proper object type"""
         if not self._connected:
             await self.connect()
         try:
@@ -268,17 +333,115 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             
             entity_dict = EntitySerializer.document_to_entity_dict(document, self.entity_type)
             
-            # AGGIUNTO: Converte il dizionario in un oggetto
-            entity_wrapper = DictToObjectWrapper(entity_dict)
+            entity = self._deserialize_entity(entity_dict)
             
             logger.debug(f'Loaded entity {entity_id} from {self._collection_name}')
-            return entity_wrapper
+            return entity
+            
         except EntityNotFoundError:
             raise
         except Exception as e:
             logger.error(f'Failed to load entity {entity_id}: {e}')
             raise StorageError(f'Load operation failed: {e}')
-    
+    def _deserialize_entity(self, entity_dict: Dict[str, Any]) -> T:
+        """Deserialize entity dict to proper object type"""
+        entity_type_name = self.entity_type.__name__
+        
+        try:
+            if entity_type_name == 'EnhancedUser' or 'user_id' in entity_dict:
+                return self._deserialize_user(entity_dict)
+            elif entity_type_name == 'Tenant' or 'tenant_id' in entity_dict:
+                return self._deserialize_tenant(entity_dict)
+            else:
+                from src.utils.entity_wrapper import DictToObjectWrapper
+                return DictToObjectWrapper(entity_dict)
+                
+        except Exception as e:
+            logger.error(f"Failed to deserialize {entity_type_name}: {e}")
+            # Fallback a wrapper generico
+            from src.utils.entity_wrapper import DictToObjectWrapper
+            return DictToObjectWrapper(entity_dict)
+    def _deserialize_user(self, user_dict: Dict[str, Any]) -> 'EnhancedUser':
+        """Deserialize user data to EnhancedUser object"""
+        from src.layers.application.auth.user_registration import EnhancedUser
+        from datetime import datetime, timezone
+        from uuid import UUID
+        
+        # Estrai i dati necessari
+        user_id = UUID(user_dict['user_id']) if isinstance(user_dict['user_id'], str) else user_dict['user_id']
+        tenant_id = UUID(user_dict['tenant_id']) if isinstance(user_dict['tenant_id'], str) else user_dict['tenant_id']
+        
+        # Parse date strings
+        created_at = None
+        if user_dict.get('created_at'):
+            try:
+                created_at = datetime.fromisoformat(user_dict['created_at'].replace('Z', '+00:00'))
+            except:
+                created_at = datetime.now(timezone.utc)
+        
+        last_login = None
+        if user_dict.get('last_login'):
+            try:
+                last_login = datetime.fromisoformat(user_dict['last_login'].replace('Z', '+00:00'))
+            except:
+                last_login = None
+        
+        # Crea oggetto EnhancedUser
+        user = EnhancedUser(
+            user_id=user_id,
+            username=user_dict['username'],
+            email=user_dict['email'],
+            password_hash=user_dict['password_hash'],  # ← QUESTO È CRUCIALE!
+            role=user_dict['role'],
+            tenant_id=tenant_id,
+            first_name=user_dict['first_name'],
+            last_name=user_dict['last_name'],
+            is_active=user_dict.get('is_active', True),
+            metadata=user_dict.get('metadata', {}),
+            created_at=created_at,
+            last_login=last_login
+        )
+        
+        return user
+
+    def _deserialize_tenant(self, tenant_dict: Dict[str, Any]) -> 'Tenant':
+        """Deserialize tenant data to Tenant object"""
+        from src.layers.application.auth.user_registration import Tenant
+        from datetime import datetime, timezone
+        from uuid import UUID
+        
+        tenant_id = UUID(tenant_dict['tenant_id']) if isinstance(tenant_dict['tenant_id'], str) else tenant_dict['tenant_id']
+        
+        # Parse created_by UUID
+        created_by = None
+        if tenant_dict.get('created_by'):
+            try:
+                created_by = UUID(tenant_dict['created_by'])
+            except:
+                created_by = None
+        
+        # Parse created_at
+        created_at = datetime.now(timezone.utc)
+        if tenant_dict.get('created_at'):
+            try:
+                created_at = datetime.fromisoformat(tenant_dict['created_at'].replace('Z', '+00:00'))
+            except:
+                pass
+        
+        # Crea oggetto Tenant
+        tenant = Tenant(
+            tenant_id=tenant_id,
+            name=tenant_dict['name'],
+            plan=tenant_dict.get('plan', 'free'),
+            created_by=created_by,
+            metadata=tenant_dict.get('metadata', {})
+        )
+        
+        tenant.created_at = created_at
+        tenant.is_active = tenant_dict.get('is_active', True)
+        tenant.settings = tenant_dict.get('settings', tenant._get_plan_limits(tenant.plan))
+        
+        return tenant
     
     async def delete(self, entity_id: UUID) -> None:
         """Delete entity from MongoDB."""
@@ -299,28 +462,26 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             logger.error(f"Failed to delete entity {entity_id}: {e}")
             raise StorageError(f"Delete operation failed: {e}")
     
-    async def query(self, filters: Dict[str, Any], limit: Optional[int]=None, offset: Optional[int]=None) -> List[T]:
+    async def query(self, filters: Optional[Dict[str, Any]] = None) -> List[T]:
+        """Query entities from MongoDB with proper deserialization"""
         if not self._connected:
             await self.connect()
+        
         try:
-            mongo_filter = self._build_mongo_filter(filters)
-            cursor = self._collection.find(mongo_filter)
-            if offset:
-                cursor = cursor.skip(offset)
-            if limit:
-                cursor = cursor.limit(limit)
-            documents = await cursor.to_list(length=limit)
+            query_filter = filters or {}
+            cursor = self._collection.find(query_filter)
+            documents = await cursor.to_list(length=None)
             
             entities = []
             for doc in documents:
                 entity_dict = EntitySerializer.document_to_entity_dict(doc, self.entity_type)
-                
-                # AGGIUNTO: Converte il dizionario in un oggetto
-                entity_wrapper = DictToObjectWrapper(entity_dict)
-                entities.append(entity_wrapper)
-                        
+                # ✅ FIX: Usa il nuovo metodo di deserializzazione
+                entity = self._deserialize_entity(entity_dict)
+                entities.append(entity)
+            
             logger.debug(f'Queried {len(entities)} entities from {self._collection_name}')
             return entities
+            
         except Exception as e:
             logger.error(f'Failed to query entities: {e}')
             raise StorageError(f'Query operation failed: {e}')

@@ -284,20 +284,34 @@ class JWTProvider:
         # Update last login
         await self.update_user_login(username)
         
-        # Create AuthContext
-        from src.layers.application.auth import AuthContext, AuthSubject, AuthSubjectType, AuthMethod
+        # ✅ FIX: Create AuthContext with correct parameters
+        from src.layers.application.auth import AuthContext, AuthSubjectType, AuthMethod
         
-        subject = AuthSubject(
-            subject_id=user.user_id,
-            subject_type=AuthSubjectType.USER,
-            roles=[user.role],
-            metadata=user.metadata
-        )
+        # Get user permissions
+        user_permissions = []
+        if hasattr(user, 'custom_metadata') and user.custom_metadata:
+            user_permissions = user.custom_metadata.get('tenant_permissions', [])
+        elif hasattr(user, 'metadata') and user.metadata:
+            # Handle both BaseMetadata and dict metadata
+            if hasattr(user.metadata, 'get'):  # BaseMetadata
+                user_permissions = user.metadata.get('tenant_permissions', [])
+            elif hasattr(user.metadata, 'custom'):  # BaseMetadata with custom
+                user_permissions = user.metadata.custom.get('tenant_permissions', [])
+            elif isinstance(user.metadata, dict):  # Plain dict
+                user_permissions = user.metadata.get('tenant_permissions', [])
         
+        # Create AuthContext correctly
         return AuthContext(
-            subject=subject,
-            method=AuthMethod.PASSWORD,
-            metadata={'login_time': datetime.now(timezone.utc).isoformat()}
+            subject_type=AuthSubjectType.USER,
+            subject_id=user.user_id,
+            auth_method=AuthMethod.JWT_TOKEN,  # ✅ Use JWT_TOKEN instead of PASSWORD
+            permissions=user_permissions,
+            metadata={
+                'username': user.username,
+                'email': user.email,
+                'tenant_id': str(user.tenant_id),
+                'login_time': datetime.now(timezone.utc).isoformat()
+            }
         )
 
     async def generate_token_pair(self, user: 'User') -> 'TokenPair':
@@ -334,15 +348,13 @@ class JWTProvider:
         refresh_token = jwt.encode(refresh_payload, self.secret_key, algorithm=self.algorithm)
         
         # Create TokenPair object
-        from collections import namedtuple
-        TokenPair = namedtuple('TokenPair', ['access_token', 'refresh_token', 'token_type', 'expires_in'])
-        
         return TokenPair(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            token_type='Bearer',
-            expires_in=3600
-        )
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_type='Bearer',
+                expires_in=3600,
+                refresh_expires_in=86400
+            )
 
     async def refresh_token(self, refresh_token: str) -> 'TokenPair':
         """Refresh access token using refresh token"""

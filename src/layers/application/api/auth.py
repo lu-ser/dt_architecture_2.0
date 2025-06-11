@@ -354,21 +354,16 @@ async def invite_user_to_tenant(
     auth_context: AuthContext = Depends(get_auth_context),
     registration_service: UserRegistrationService = Depends(get_registration_service)
 ) -> Dict[str, Any]:
-    """
-    Invita utente a unirsi al tenant corrente
-    
-    - Solo admin possono invitare
-    - Verifica limiti del piano
-    - Invia email di invito
-    """
     try:
-        # Verifica che l'utente sia admin
         if not auth_context.has_permission('user:manage'):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can invite users")
         
-        tenant_id = UUID(auth_context.metadata.get('tenant_id'))
+        tenant_id_str = auth_context.metadata.get('tenant_id')
+        if not tenant_id_str:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No tenant_id in auth context")
         
-        # Invia invito
+        tenant_id = UUID(tenant_id_str)
+        
         result = await registration_service.invite_user_to_tenant(
             tenant_id=tenant_id,
             inviter_id=auth_context.subject_id,
@@ -427,18 +422,22 @@ async def get_current_user(
     auth_context: AuthContext = Depends(get_auth_context),
     registration_service: UserRegistrationService = Depends(get_registration_service)
 ) -> Dict[str, Any]:
-    """
-    Restituisce informazioni sull'utente corrente e il suo tenant
-    """
     try:
-        # Ottieni user
         user = await registration_service.jwt_provider.get_user_by_id(auth_context.subject_id)
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         
-        # Ottieni tenant info
-        tenant_id = UUID(user.metadata.get('tenant_id'))
-        tenant_info = await registration_service.get_tenant_info(tenant_id)
+        # ✅ FIX: Usa .custom.get() invece di .get()
+        tenant_id_str = user.metadata.custom.get('tenant_id')
+        if not tenant_id_str:
+            # Fallback: prova ad accedere direttamente 
+            tenant_id_str = str(user.tenant_id) if hasattr(user, 'tenant_id') else None
+        
+        if tenant_id_str:
+            tenant_id = UUID(tenant_id_str)
+            tenant_info = await registration_service.get_tenant_info(tenant_id)
+        else:
+            tenant_info = None
         
         return {
             'user': user.to_dict(),
@@ -450,16 +449,20 @@ async def get_current_user(
         logger.error(f"Get current user failed: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get user info")
 
-@router.get("/tenant", summary="Get Tenant Info", response_model=TenantResponse)
+
+
+
+@router.get("/tenant", summary="Get Tenant Info")
 async def get_tenant_info(
     auth_context: AuthContext = Depends(get_auth_context),
     registration_service: UserRegistrationService = Depends(get_registration_service)
 ) -> Dict[str, Any]:
-    """
-    Restituisce informazioni dettagliate sul tenant corrente
-    """
     try:
-        tenant_id = UUID(auth_context.metadata.get('tenant_id'))
+        tenant_id_str = auth_context.metadata.get('tenant_id')
+        if not tenant_id_str:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No tenant_id in auth context")
+        
+        tenant_id = UUID(tenant_id_str)
         tenant_info = await registration_service.get_tenant_info(tenant_id)
         
         return tenant_info
