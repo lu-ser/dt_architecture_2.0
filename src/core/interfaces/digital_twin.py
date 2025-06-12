@@ -25,7 +25,8 @@ class DigitalTwinType(Enum):
     HUMAN = "human"                     # Human digital twin
     PRODUCT = "product"                 # Product lifecycle twin
     INFRASTRUCTURE = "infrastructure"   # Infrastructure monitoring
-    COMPOSITE = "composite"             # Combination of multiple types
+    COMPOSITE = "composite"  
+    USER = "user"           # Combination of multiple types
 
 
 class DigitalTwinState(Enum):

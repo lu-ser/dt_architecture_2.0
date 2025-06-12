@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Type
 from uuid import UUID, uuid4
-
+from pathlib import Path
 from src.core.interfaces.base import BaseMetadata, EntityStatus
 from src.core.interfaces.digital_twin import (
     IDigitalTwin,
@@ -801,9 +801,21 @@ class DigitalTwinFactory(IDigitalTwinFactory):
     
     def __init__(self):
         self.config = get_config()
-        self._supported_types = list(DigitalTwinType)
+        self._supported_types = [
+            DigitalTwinType.ASSET,
+            DigitalTwinType.PROCESS,
+            DigitalTwinType.SYSTEM,
+            DigitalTwinType.INFRASTRUCTURE,
+            DigitalTwinType.USER
+        ]
+        # Template cache
+        self._template_cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_loaded = False
+
         self._model_templates: Dict[str, TwinModel] = {}
         self._load_default_model_templates()
+        # Template directory
+        self._template_base_path = Path("src/templates/digital_replicas")
     
     async def create_twin(self, twin_type: DigitalTwinType, config: DigitalTwinConfiguration, 
                          models: Optional[List[TwinModel]] = None, metadata: Optional[BaseMetadata] = None,
@@ -846,6 +858,328 @@ class DigitalTwinFactory(IDigitalTwinFactory):
             logger.error(f'Failed to create Digital Twin: {e}')
             raise EntityCreationError(f'Digital Twin creation failed: {e}')
     
+
+    def _load_templates_from_files_sync(self) -> Dict[str, Dict[str, Any]]:
+        """Load templates synchronously from files."""
+        templates = {}
+        
+        try:
+            # Method 1: Try OntologyManager
+            try:
+                from src.layers.virtualization.ontology.manager import get_ontology_manager
+                ontology_manager = get_ontology_manager()
+                
+                for template_id, template_obj in ontology_manager.templates.items():
+                    if hasattr(template_obj, 'configuration') and template_obj.configuration:
+                        config = template_obj.configuration
+                        templates[template_id] = {
+                            "twin_type": config.get("twin_type", "asset"),
+                            "name": template_obj.name,
+                            "description": template_obj.description,
+                            "capabilities": config.get("capabilities", ["monitoring"]),
+                            "model_configurations": config.get("model_configurations", {}),
+                            "data_sources": config.get("data_sources", []),
+                            "update_frequency": config.get("update_frequency", 60),
+                            "retention_policy": config.get("data_retention_policy", {}),
+                            "quality_requirements": config.get("quality_requirements", {}),
+                            "model_templates": config.get("model_templates", [])
+                        }
+                logger.debug(f"Loaded {len(templates)} templates from OntologyManager")
+            except Exception as e:
+                logger.debug(f"OntologyManager not available: {e}")
+            
+            # Method 2: Scan files directly
+            if not templates and self._template_base_path.exists():
+                for template_file in self._template_base_path.glob("*.json"):
+                    try:
+                        with open(template_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        
+                        template_id = data.get("template_id", template_file.stem)
+                        
+                        if "configuration" in data:
+                            # Ontology manager format
+                            config = data["configuration"]
+                            templates[template_id] = {
+                                "twin_type": config.get("twin_type", "asset"),
+                                "name": data.get("name", template_id),
+                                "description": data.get("description", ""),
+                                "capabilities": config.get("capabilities", ["monitoring"]),
+                                "model_configurations": config.get("model_configurations", {}),
+                                "data_sources": config.get("data_sources", []),
+                                "update_frequency": config.get("update_frequency", 60),
+                                "retention_policy": config.get("data_retention_policy", {}),
+                                "quality_requirements": config.get("quality_requirements", {}),
+                                "model_templates": config.get("model_templates", [])
+                            }
+                        else:
+                            # Direct format
+                            templates[template_id] = data
+                        
+                        logger.debug(f"Loaded template from file: {template_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not load template {template_file}: {e}")
+            
+            # Method 3: Hardcoded fallback
+            if not templates:
+                templates = self._get_hardcoded_templates()
+                logger.info("Using hardcoded templates as fallback")
+            
+        except Exception as e:
+            logger.error(f"Error loading templates: {e}")
+            templates = self._get_hardcoded_templates()
+        
+        return templates
+
+    def _get_hardcoded_templates(self) -> Dict[str, Dict[str, Any]]:
+        """Get hardcoded templates for fallback."""
+        return {
+            "industrial_asset": {
+                "twin_type": DigitalTwinType.ASSET.value,
+                "name": "Industrial Asset Twin",
+                "description": "Digital Twin for industrial assets with monitoring and prediction",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.ANALYTICS.value,
+                    TwinCapability.PREDICTION.value,
+                    TwinCapability.MAINTENANCE_PLANNING.value
+                ],
+                "model_configurations": {
+                    TwinModelType.PHYSICS_BASED.value: {"enabled": True},
+                    TwinModelType.DATA_DRIVEN.value: {"enabled": True}
+                },
+                "data_sources": ["sensors", "maintenance_logs", "operational_data"],
+                "update_frequency": 30,
+                "model_templates": ["basic_physics", "basic_ml"]
+            },
+            "smart_building": {
+                "twin_type": DigitalTwinType.INFRASTRUCTURE.value,
+                "name": "Smart Building Twin",
+                "description": "Digital Twin for smart building management",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.OPTIMIZATION.value,
+                    TwinCapability.CONTROL.value
+                ],
+                "model_configurations": {
+                    TwinModelType.HYBRID.value: {"enabled": True}
+                },
+                "data_sources": ["hvac_sensors", "occupancy_sensors", "energy_meters"],
+                "update_frequency": 60,
+                "model_templates": ["basic_physics"]
+            },
+            "user_smartwatch": {
+                "twin_type": DigitalTwinType.USER.value,  # ← Potrebbe dover essere DigitalTwinType.ASSET.value
+                "name": "User Smartwatch Twin",
+                "description": "Digital Twin for user wearable devices with health monitoring",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.ANALYTICS.value,
+                    TwinCapability.PREDICTION.value,
+                    TwinCapability.ANOMALY_DETECTION.value
+                ],
+                "model_configurations": {
+                    TwinModelType.DATA_DRIVEN.value: {"enabled": True}
+                },
+                "data_sources": [
+                    "heart_rate_sensor", "accelerometer", "gyroscope",
+                    "gps_location", "sleep_sensor", "stress_sensor"
+                ],
+                "update_frequency": 5,
+                "quality_requirements": {
+                    "min_quality": 0.85,
+                    "alert_threshold": 0.7
+                },
+                "model_templates": ["basic_ml"]
+            }
+        }
+
+    async def _load_from_ontology_manager(self) -> None:
+        """Load templates from OntologyManager."""
+        try:
+            ontology_manager = get_ontology_manager()
+            
+            # Ensure templates are loaded
+            if not ontology_manager.templates:
+                await ontology_manager.load_templates()
+            
+            # Convert ontology manager templates to our format
+            for template_id, template_obj in ontology_manager.templates.items():
+                if hasattr(template_obj, 'configuration') and template_obj.configuration:
+                    # Convert ontology template to DT factory format
+                    config = template_obj.configuration
+                    
+                    dt_template = {
+                        "template_id": template_id,
+                        "name": template_obj.name,
+                        "description": template_obj.description,
+                        "twin_type": config.get("twin_type", "asset"),
+                        "capabilities": config.get("capabilities", ["monitoring"]),
+                        "data_sources": config.get("data_sources", []),
+                        "update_frequency": config.get("update_frequency", 60),
+                        "model_configurations": config.get("model_configurations", {}),
+                        "quality_requirements": config.get("quality_requirements", {}),
+                        "retention_policy": config.get("data_retention_policy", {}),
+                        "custom_config": config.get("custom_config", {}),
+                        "model_templates": config.get("model_templates", []),
+                        "metadata": template_obj.metadata
+                    }
+                    
+                    self._template_cache[template_id] = dt_template
+                    logger.debug(f"Loaded template from OntologyManager: {template_id}")
+            
+        except Exception as e:
+            logger.warning(f"Could not load from OntologyManager: {e}")
+
+    async def _load_from_filesystem(self) -> None:
+        """Load templates directly from filesystem."""
+        if not self._template_base_path.exists():
+            logger.warning(f"Template directory not found: {self._template_base_path}")
+            return
+        
+        # Load JSON templates
+        for template_file in self._template_base_path.glob("*.json"):
+            try:
+                with open(template_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                template_id = data.get("template_id", template_file.stem)
+                
+                # Convert to DT factory format if needed
+                if "configuration" in data:
+                    # It's an ontology manager format
+                    config = data["configuration"]
+                    dt_template = {
+                        "template_id": template_id,
+                        "name": data.get("name", template_id),
+                        "description": data.get("description", ""),
+                        "twin_type": config.get("twin_type", "asset"),
+                        "capabilities": config.get("capabilities", ["monitoring"]),
+                        "data_sources": config.get("data_sources", []),
+                        "update_frequency": config.get("update_frequency", 60),
+                        "model_configurations": config.get("model_configurations", {}),
+                        "quality_requirements": config.get("quality_requirements", {}),
+                        "retention_policy": config.get("data_retention_policy", {}),
+                        "model_templates": config.get("model_templates", [])
+                    }
+                else:
+                    # It's already in DT factory format
+                    dt_template = data
+                
+                self._template_cache[template_id] = dt_template
+                logger.debug(f"Loaded template from file: {template_id}")
+                
+            except Exception as e:
+                logger.error(f"Failed to load template from {template_file}: {e}")
+    
+    def _load_hardcoded_templates(self) -> None:
+        """Load hardcoded templates as fallback."""
+        hardcoded_templates = {
+            "industrial_asset": {
+                "twin_type": DigitalTwinType.ASSET.value,
+                "name": "Industrial Asset Twin",
+                "description": "Digital Twin for industrial assets with monitoring and prediction",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.ANALYTICS.value,
+                    TwinCapability.PREDICTION.value,
+                    TwinCapability.MAINTENANCE_PLANNING.value
+                ],
+                "model_configurations": {
+                    TwinModelType.PHYSICS_BASED.value: {"enabled": True},
+                    TwinModelType.DATA_DRIVEN.value: {"enabled": True}
+                },
+                "data_sources": ["sensors", "maintenance_logs", "operational_data"],
+                "update_frequency": 30,
+                "model_templates": ["basic_physics", "basic_ml"]
+            },
+            "smart_building": {
+                "twin_type": DigitalTwinType.INFRASTRUCTURE.value,
+                "name": "Smart Building Twin",
+                "description": "Digital Twin for smart building management",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.OPTIMIZATION.value,
+                    TwinCapability.CONTROL.value
+                ],
+                "model_configurations": {
+                    TwinModelType.HYBRID.value: {"enabled": True}
+                },
+                "data_sources": ["hvac_sensors", "occupancy_sensors", "energy_meters"],
+                "update_frequency": 60,
+                "model_templates": ["basic_physics"]
+            },
+            "iot_device_system": {
+                "twin_type": DigitalTwinType.SYSTEM.value,
+                "name": "IoT Device System Twin",
+                "description": "Digital Twin for IoT device systems",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.ANALYTICS.value
+                ],
+                "data_sources": ["iot_sensors", "device_telemetry"],
+                "update_frequency": 15,
+                "model_templates": ["basic_ml"]
+            },
+            "production_line": {
+                "twin_type": DigitalTwinType.PROCESS.value,
+                "name": "Production Line Twin",
+                "description": "Digital Twin for manufacturing production lines",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.OPTIMIZATION.value,
+                    TwinCapability.PREDICTION.value
+                ],
+                "data_sources": ["production_sensors", "quality_metrics"],
+                "update_frequency": 20,
+                "model_templates": ["basic_physics", "basic_ml"]
+            },
+            "energy_system": {
+                "twin_type": DigitalTwinType.INFRASTRUCTURE.value,
+                "name": "Energy System Twin",
+                "description": "Digital Twin for energy management systems",
+                "capabilities": [
+                    TwinCapability.MONITORING.value,
+                    TwinCapability.OPTIMIZATION.value,
+                    TwinCapability.CONTROL.value
+                ],
+                "data_sources": ["energy_meters", "grid_sensors"],
+                "update_frequency": 10,
+                "model_templates": ["basic_physics"]
+            }
+        }
+        
+        for template_id, template_data in hardcoded_templates.items():
+            if template_id not in self._template_cache:
+                self._template_cache[template_id] = template_data
+        
+        logger.info(f"Loaded {len(hardcoded_templates)} hardcoded templates as fallback")
+
+    async def _ensure_templates_loaded(self) -> None:
+        """Ensure templates are loaded from files and ontology manager."""
+        if self._cache_loaded:
+            return
+            
+        try:
+            # Method 1: Load from OntologyManager (preferred)
+            await self._load_from_ontology_manager()
+            
+            # Method 2: Direct file system fallback
+            if not self._template_cache:
+                await self._load_from_filesystem()
+            
+            # Method 3: Hardcoded fallback for compatibility
+            if not self._template_cache:
+                self._load_hardcoded_templates()
+            
+            self._cache_loaded = True
+            logger.info(f"Loaded {len(self._template_cache)} Digital Twin templates")
+            
+        except Exception as e:
+            logger.error(f"Failed to load templates: {e}")
+            # Load hardcoded as last resort
+            self._load_hardcoded_templates()
+            self._cache_loaded = True
 
     async def create_secure_twin(self, twin_type: DigitalTwinType, config: DigitalTwinConfiguration,
                                 owner_id: UUID, tenant_id: UUID,
@@ -914,16 +1248,38 @@ class DigitalTwinFactory(IDigitalTwinFactory):
         """Get the list of Digital Twin types this factory can create."""
         return self._supported_types.copy()
     
-    def get_available_templates(self) -> List[str]:
-        """Get the list of available Digital Twin templates."""
-        return [
-            "industrial_asset",
-            "smart_building",
-            "iot_device_system",
-            "production_line",
-            "energy_system"
-        ]
+    def _ensure_templates_cached(self) -> None:
+        """Ensure templates are loaded in cache (synchronous)."""
+        if self._template_cache is None:
+            self._template_cache = self._load_templates_from_files_sync()
+            logger.info(f"Cached {len(self._template_cache)} templates")
+
+    async def get_available_templates(self) -> List[str]:
+        """Get the list of available Digital Twin templates (dynamically loaded)."""
+        await self._ensure_templates_loaded()
+        templates = list(self._template_cache.keys())
+        logger.debug(f"Available templates: {templates}")
+        return templates
     
+    async def get_template_info(self, template_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed information about a template."""
+        await self._ensure_templates_loaded()
+        template = self._template_cache.get(template_id)
+        
+        if template:
+            return {
+                "template_id": template_id,
+                "name": template.get("name", template_id),
+                "description": template.get("description", ""),
+                "twin_type": template.get("twin_type"),
+                "capabilities": template.get("capabilities", []),
+                "data_sources": template.get("data_sources", []),
+                "update_frequency": template.get("update_frequency", 60),
+                "metadata": template.get("metadata", {})
+            }
+        
+        return None
+
     def get_template_schema(self, template_name: str) -> Dict[str, Any]:
         """Get the schema for a specific template."""
         return {
@@ -1104,45 +1460,7 @@ class DigitalTwinFactory(IDigitalTwinFactory):
         
         logger.info(f"Loaded {len(self._model_templates)} model templates")
     
-    def _get_twin_template(self, template_name: str) -> Optional[Dict[str, Any]]:
-        """Get a Digital Twin template by name."""
-        templates = {
-            "industrial_asset": {
-                "twin_type": DigitalTwinType.ASSET.value,
-                "name": "Industrial Asset Twin",
-                "description": "Digital Twin for industrial assets with monitoring and prediction",
-                "capabilities": [
-                    TwinCapability.MONITORING.value,
-                    TwinCapability.ANALYTICS.value,
-                    TwinCapability.PREDICTION.value,
-                    TwinCapability.MAINTENANCE_PLANNING.value
-                ],
-                "model_configurations": {
-                    TwinModelType.PHYSICS_BASED.value: {"enabled": True},
-                    TwinModelType.DATA_DRIVEN.value: {"enabled": True}
-                },
-                "data_sources": ["sensors", "maintenance_logs", "operational_data"],
-                "update_frequency": 30,
-                "model_templates": ["basic_physics", "basic_ml"]
-            },
-            "smart_building": {
-                "twin_type": DigitalTwinType.INFRASTRUCTURE.value,
-                "name": "Smart Building Twin",
-                "description": "Digital Twin for smart building management",
-                "capabilities": [
-                    TwinCapability.MONITORING.value,
-                    TwinCapability.OPTIMIZATION.value,
-                    TwinCapability.CONTROL.value
-                ],
-                "model_configurations": {
-                    TwinModelType.HYBRID.value: {"enabled": True}
-                },
-                "data_sources": ["hvac_sensors", "occupancy_sensors", "energy_meters"],
-                "update_frequency": 60,
-                "model_templates": ["basic_physics"]
-            }
-        }
-        return templates.get(template_name)
+
     
     def _apply_template_customization(
         self,
@@ -1161,3 +1479,87 @@ class DigitalTwinFactory(IDigitalTwinFactory):
                     customized[key] = value
         
         return customized
+    
+    def _get_twin_template_sync(self, template_name: str) -> Optional[Dict[str, Any]]:
+        """Synchronous version for backward compatibility."""
+        # Try cache first
+        if self._cache_loaded and template_name in self._template_cache:
+            return self._template_cache[template_name]
+        
+        # Load hardcoded as immediate fallback
+        self._load_hardcoded_templates()
+        return self._template_cache.get(template_name)
+    
+    async def reload_templates(self) -> None:
+        """Reload all templates from source."""
+        self._template_cache.clear()
+        self._cache_loaded = False
+        await self._ensure_templates_loaded()
+        logger.info(f"Reloaded {len(self._template_cache)} templates")
+    
+    async def create_from_template(
+        self,
+        template_name: str,
+        customization: Optional[Dict[str, Any]] = None,
+        metadata: Optional[BaseMetadata] = None
+    ) -> IDigitalTwin:
+        """Create a Digital Twin from a predefined template."""
+        
+        template = await self._get_twin_template(template_name)
+        if not template:
+            available = await self.get_available_templates()
+            raise FactoryConfigurationError(
+                f"Digital Twin template '{template_name}' not found. "
+                f"Available templates: {available}"
+            )
+        
+        # Apply customization
+        if customization:
+            template = self._apply_template_customization(template, customization)
+        
+        # Extract configuration from template
+        twin_type = DigitalTwinType(template["twin_type"])
+        config = DigitalTwinConfiguration(
+            twin_type=twin_type,
+            name=template["name"],
+            description=template["description"],
+            capabilities=set(TwinCapability(cap) for cap in template["capabilities"]),
+            model_configurations=template.get("model_configurations", {}),
+            data_sources=template.get("data_sources", []),
+            update_frequency=template.get("update_frequency", 60),
+            retention_policy=template.get("retention_policy", {}),
+            quality_requirements=template.get("quality_requirements", {}),
+            custom_config=template.get("custom_config", {})
+        )
+        
+        # Create models from template
+        models = []
+        for model_template_id in template.get("model_templates", []):
+            if model_template_id in self._model_templates:
+                models.append(self._model_templates[model_template_id])
+        
+        return await self.create_twin(twin_type, config, models, metadata)
+    
+    # Keep backward compatibility
+    def get_available_templates_sync(self) -> List[str]:
+        """Synchronous version for backward compatibility."""
+        if not self._cache_loaded:
+            self._load_hardcoded_templates()
+        return list(self._template_cache.keys())
+    
+    # Update the old method to maintain compatibility
+    def get_available_templates_old(self) -> List[str]:
+        """DEPRECATED: Use async get_available_templates() instead."""
+        logger.warning("Using deprecated get_available_templates_old(). Use async version.")
+        return self.get_available_templates_sync()
+    
+    async def get_available_templates_async(self) -> List[str]:
+        """Async version of get_available_templates."""
+        # For now, just call sync version
+        return self.get_available_templates()
+        
+    def refresh_templates(self) -> None:
+        """Refresh template cache."""
+        self._template_cache = None
+        self._ensure_templates_cached()
+        logger.info("Template cache refreshed")

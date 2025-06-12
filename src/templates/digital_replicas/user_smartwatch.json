@@ -1,0 +1,67 @@
+{
+    "twin_type": "user",
+    "name": "SmartWatch Digital Twin - Test User",
+    "description": "Digital Twin for user wearable device monitoring health and activity data",
+    "capabilities": [
+        "monitoring",
+        "analytics",
+        "prediction",
+        "anomaly_detection"
+    ],
+    "template_id": "user_smartwatch",
+    "security_enabled": true,
+    "shared_with_tenant": false,
+    "customization": {
+        "data_sources": [
+            "heart_rate_sensor",
+            "accelerometer",
+            "gyroscope",
+            "gps_location",
+            "sleep_sensor",
+            "stress_sensor",
+            "blood_oxygen_sensor"
+        ],
+        "update_frequency": 5,
+        "quality_requirements": {
+            "min_quality": 0.85,
+            "alert_threshold": 0.7
+        },
+        "model_configurations": {
+            "health_model": {
+                "enabled": true,
+                "parameters": {
+                    "user_profile": "adult_active",
+                    "baseline_hr": "60-80",
+                    "activity_goals": {
+                        "daily_steps": 10000,
+                        "weekly_exercise_minutes": 150
+                    }
+                }
+            },
+            "predictive_model": {
+                "enabled": true,
+                "ml_model": "health_anomaly_detection",
+                "training_data_days": 30
+            }
+        },
+        "privacy_settings": {
+            "data_encryption": true,
+            "anonymization": true,
+            "retention_days": 365,
+            "health_data_protection": "hipaa_compliant"
+        },
+        "user_preferences": {
+            "notification_threshold": "medium",
+            "sharing_permissions": [
+                "healthcare_provider"
+            ],
+            "data_export_format": "json"
+        }
+    },
+    "authorized_users": [
+        {
+            "user_id": "123e4567-e89b-12d3-a456-426614174000",
+            "access_level": "admin"
+        }
+    ]
+}
