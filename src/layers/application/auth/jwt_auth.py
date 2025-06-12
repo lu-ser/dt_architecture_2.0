@@ -190,16 +190,113 @@ class JWTProvider:
             
             # Carica users esistenti in memoria
             user_entities = await self._user_adapter.query({'is_active': True})
-            for user in user_entities:
+            for user_entity in user_entities:
+                # Converti DictToObjectWrapper in vero EnhancedUser
+                if hasattr(user_entity, '_data'):  # È un wrapper
+                    user_dict = user_entity._data
+                    from src.layers.application.auth.user_registration import EnhancedUser
+                    from uuid import UUID
+                    from datetime import datetime, timezone
+                    
+                    user = EnhancedUser(
+                        user_id=UUID(user_dict['user_id']),
+                        username=user_dict['username'],
+                        email=user_dict['email'],
+                        password_hash=user_dict['password_hash'],
+                        role=user_dict.get('role', 'viewer'),
+                        tenant_id=UUID(user_dict['tenant_id']),
+                        first_name=user_dict.get('first_name', ''),
+                        last_name=user_dict.get('last_name', ''),
+                        is_active=user_dict.get('is_active', True),
+                        metadata=user_dict.get('metadata', {}),
+                        created_at=datetime.fromisoformat(user_dict['created_at']) if user_dict.get('created_at') else None,
+                        last_login=datetime.fromisoformat(user_dict['last_login']) if user_dict.get('last_login') else None
+                    )
+                else:
+                    user = user_entity  # Già un EnhancedUser
+                
                 self.users[user.username] = user
                 self.users_by_id[user.user_id] = user
-                
             logger.info(f"JWTProvider loaded {len(self.users)} users from database")
                 
         except Exception as e:
             logger.info(f"JWTProvider fallback to memory-only mode: {e}")
         
         self._initialized = True
+    async def validate_token(self, token: str) -> 'AuthContext':
+        """Validate JWT token and return AuthContext"""
+        try:
+            # Decode JWT token
+            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            
+            # Check if token is revoked
+            if token in self.revoked_tokens:
+                raise AuthenticationError('Token has been revoked')
+            
+            # Extract user info with validation
+            user_id_str = payload.get('sub') 
+            if not user_id_str:
+                raise AuthenticationError('Token missing sub')
+                
+            try:
+                user_id = UUID(user_id_str)
+            except (ValueError, TypeError):
+                raise AuthenticationError('Invalid user_id in token')
+            
+            username = payload.get('username')
+            if not username:
+                raise AuthenticationError('Token missing username')
+            
+            # Get user from memory/database
+            user = await self.get_user_by_id(user_id)
+            if not user:
+                raise AuthenticationError('User not found')
+            
+            if not user.is_active:
+                raise AuthenticationError('User account is inactive')
+            
+            # Create AuthContext
+            from src.layers.application.auth import AuthContext, AuthSubjectType, AuthMethod
+            from datetime import datetime, timezone
+            
+            # Get user permissions
+            user_permissions = []
+            if hasattr(user, 'custom_metadata') and user.custom_metadata:
+                user_permissions = user.custom_metadata.get('tenant_permissions', [])
+            elif hasattr(user, 'metadata') and user.metadata:
+                if hasattr(user.metadata, 'get'):
+                    user_permissions = user.metadata.get('tenant_permissions', [])
+                elif hasattr(user.metadata, 'custom'):
+                    user_permissions = user.metadata.custom.get('tenant_permissions', [])
+                elif isinstance(user.metadata, dict):
+                    user_permissions = user.metadata.get('tenant_permissions', [])
+            
+            # Add role-based permissions
+            role_permissions = UserRole.get_permissions(user.role)
+            all_permissions = list(set(user_permissions + role_permissions))
+            
+            return AuthContext(
+                subject_type=AuthSubjectType.USER,
+                subject_id=user.user_id,
+                auth_method=AuthMethod.JWT_TOKEN,
+                permissions=all_permissions,
+                metadata={
+                    'username': user.username,
+                    'email': user.email,
+                    'tenant_id': str(getattr(user, 'tenant_id', '')),
+                    'role': user.role
+                },
+                expires_at=datetime.fromtimestamp(payload.get('exp'), tz=timezone.utc) if payload.get('exp') else None
+            )
+            
+        except jwt.ExpiredSignatureError:
+            raise AuthenticationError('Token has expired')
+        except jwt.InvalidTokenError as e:
+            raise AuthenticationError(f'Invalid token: {e}')
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            raise AuthenticationError(f'Token validation failed: {e}')
 
     async def get_user_by_username(self, username: str) -> Optional['User']:
         """Get user by username - check memory first, then database"""
@@ -217,8 +314,31 @@ class JWTProvider:
             try:
                 user_entities = await self._user_adapter.query({'username': username.lower().strip()})
                 if user_entities:
-                    user = user_entities[0]
+                    user_entity = user_entities[0]
                     
+                    # Converti DictToObjectWrapper in vero EnhancedUser
+                    if hasattr(user_entity, '_data'):  # È un wrapper
+                        user_dict = user_entity._data
+                        from src.layers.application.auth.user_registration import EnhancedUser
+                        from uuid import UUID
+                        from datetime import datetime, timezone
+                        
+                        user = EnhancedUser(
+                            user_id=UUID(user_dict['user_id']),
+                            username=user_dict['username'],
+                            email=user_dict['email'],
+                            password_hash=user_dict['password_hash'],
+                            role=user_dict.get('role', 'viewer'),
+                            tenant_id=UUID(user_dict['tenant_id']),
+                            first_name=user_dict.get('first_name', ''),
+                            last_name=user_dict.get('last_name', ''),
+                            is_active=user_dict.get('is_active', True),
+                            metadata=user_dict.get('metadata', {}),
+                            created_at=datetime.fromisoformat(user_dict['created_at']) if user_dict.get('created_at') else None,
+                            last_login=datetime.fromisoformat(user_dict['last_login']) if user_dict.get('last_login') else None
+                        )
+                    else:
+                        user = user_entity  # Già un EnhancedUser                    
                     # Cache the user for future access
                     self.users[user.username] = user
                     self.users_by_id[user.user_id] = user
@@ -320,41 +440,38 @@ class JWTProvider:
         from datetime import datetime, timezone, timedelta
         
         now = datetime.now(timezone.utc)
-        access_exp = now + timedelta(hours=1)
-        refresh_exp = now + timedelta(days=7)
-        
+    
         # Access token payload
         access_payload = {
-            'sub': str(user.user_id),
+            'user_id': str(user.user_id),
             'username': user.username,
             'email': user.email,
             'role': user.role,
-            'permissions': user.metadata.get('tenant_permissions', []),
             'iat': now.timestamp(),
-            'exp': access_exp.timestamp(),
+            'exp': (now + timedelta(hours=1)).timestamp(),  # 1 hour
             'type': 'access'
         }
         
+        # Generate access token
+        access_token = jwt.encode(access_payload, self.secret_key, algorithm=self.algorithm)
+        
         # Refresh token payload
         refresh_payload = {
-            'sub': str(user.user_id),
-            'username': user.username,
+            'user_id': str(user.user_id),
             'iat': now.timestamp(),
-            'exp': refresh_exp.timestamp(),
+            'exp': (now + timedelta(days=30)).timestamp(),  # 30 days
             'type': 'refresh'
         }
         
-        access_token = jwt.encode(access_payload, self.secret_key, algorithm=self.algorithm)
+        # Generate refresh token
         refresh_token = jwt.encode(refresh_payload, self.secret_key, algorithm=self.algorithm)
         
-        # Create TokenPair object
         return TokenPair(
-                access_token=access_token,
-                refresh_token=refresh_token,
-                token_type='Bearer',
-                expires_in=3600,
-                refresh_expires_in=86400
-            )
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=3600,  # 1 hour
+            refresh_expires_in=2592000  # 30 days
+        )
 
     async def refresh_token(self, refresh_token: str) -> 'TokenPair':
         """Refresh access token using refresh token"""

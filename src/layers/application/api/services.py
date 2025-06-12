@@ -220,6 +220,11 @@ async def create_service(
     """Create a new Service."""
     try:
         # Validate that either definition_id or template_id is provided
+        if hasattr(service_data, 'dict'):
+            service_config = service_data.dict()
+        else:
+            service_config = dict(service_data)
+            
         if not service_data.definition_id and not service_data.template_id:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -285,6 +285,7 @@ class EnhancedUser(User, IEntity):
         user_dict = {
             'user_id': str(self.user_id),
             'username': self.username,
+            'password_hash': self.password_hash,
             'email': self.email,
             'first_name': self.first_name,
             'last_name': self.last_name,
