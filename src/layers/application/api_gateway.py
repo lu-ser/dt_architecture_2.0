@@ -655,24 +655,40 @@ class APIGateway:
         return twin.check_access(user_id, required_access)
 
     async def _create_secure_twin_from_template(self, template_id: str, owner_id: UUID, tenant_id: UUID,
-                                               customization: Optional[Dict[str, Any]], 
-                                               twin_config: Dict[str, Any]) -> Any:
+                                            customization: Optional[Dict[str, Any]], 
+                                            twin_config: Dict[str, Any]) -> Any:
         """Create secure twin from template"""
-        # This would integrate with the secure factory
-        # For now, delegate to orchestrator with enhanced params
         
         # Parse authorized users from config
         authorized_users = {}
-        if 'authorized_users' in twin_config:
+        if 'authorized_users' in twin_config and twin_config['authorized_users'] is not None:
             for user_data in twin_config['authorized_users']:
                 user_id = UUID(user_data['user_id'])
                 access_level = DTAccessLevel(user_data['access_level'])
                 authorized_users[user_id] = access_level
         
-        # Use factory to create secure twin
-        # This would need the secure factory integration
-        raise NotImplementedError("Secure template creation needs factory integration")
-
+        try:
+            # Import SecureDigitalTwinFactory
+            from src.layers.digital_twin.secure_dt_factory import SecureDigitalTwinFactory
+            
+            # Create secure factory instance
+            secure_factory = SecureDigitalTwinFactory()
+            
+            # Create twin using secure factory
+            twin = await secure_factory.create_from_template_secure(
+                template_name=template_id,
+                owner_id=owner_id,
+                tenant_id=tenant_id,
+                customization=customization,
+                authorized_users=authorized_users
+            )
+            
+            logger.info(f'Created secure Digital Twin {twin.id} from template {template_id}')
+            return twin
+            
+        except Exception as e:
+            logger.error(f'Failed to create secure twin from template: {e}')
+            raise APIGatewayError(f'Secure template creation failed: {e}')
     async def _upgrade_twin_to_secure(self, twin, owner_id: UUID, tenant_id: UUID) -> None:
         """Upgrade existing twin to secure mode"""
         if hasattr(twin, 'security_enabled'):

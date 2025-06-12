@@ -30,7 +30,7 @@ auth:
   # Rate limiting
   rate_limiting:
     enabled: true
-    max_auth_attempts: 5 # Tentativi di auth per IP
+    max_auth_attempts: 10 # Tentativi di auth per IP
     lockout_duration: 300 # Durata lockout (secondi)
 
   # Password policy

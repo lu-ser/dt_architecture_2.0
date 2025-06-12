@@ -9,6 +9,7 @@ from src.layers.digital_twin.secure_dt_factory import SecureDigitalTwinFactory
 from src.utils.exceptions import AuthorizationError, EntityNotFoundError, ValidationError
 from src.core.interfaces.digital_twin import DigitalTwinType, TwinCapability
 from src.layers.digital_twin import DigitalTwinLayerOrchestrator
+from src.utils.type_converter import TypeConverter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

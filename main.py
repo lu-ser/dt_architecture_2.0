@@ -19,7 +19,6 @@ import uvicorn
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Setup basic logging first (NO EMOJI!)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

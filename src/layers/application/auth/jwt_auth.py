@@ -234,7 +234,7 @@ class JWTProvider:
                 raise AuthenticationError('Token has been revoked')
             
             # Extract user info with validation
-            user_id_str = payload.get('sub') 
+            user_id_str = payload.get('sub') or payload.get('user_id')
             if not user_id_str:
                 raise AuthenticationError('Token missing sub')
                 

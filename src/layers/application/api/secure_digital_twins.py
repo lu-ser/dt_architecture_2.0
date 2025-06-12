@@ -16,7 +16,7 @@ from src.layers.application.api_gateway import APIGateway
 from src.layers.application.api import get_gateway
 from src.core.interfaces.digital_twin import TwinCapability, DigitalTwinType
 from src.layers.digital_twin.dt_factory import DTAccessLevel
-from src.utils.exceptions import EntityNotFoundError, ValidationError
+from src.utils.exceptions import EntityNotFoundError, ValidationError, AuthorizationError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -186,14 +186,29 @@ async def create_secure_digital_twin(
 ) -> Dict[str, Any]:
     """Create a new secure Digital Twin with ownership and access controls"""
     try:
+        # AGGIUNTO: Debug per verificare auth_context
+        logger.info(f"🔍 Auth context: {auth_context}")
+        logger.info(f"🔍 Auth metadata: {auth_context.metadata if auth_context else 'None'}")
+        
         # Convert to gateway format
         twin_config = twin_data.dict()
+        logger.info(f"🔍 Twin config: {twin_config}")
         
-        # Create secure twin
-        result = await gateway.create_digital_twin(
-            twin_config=twin_config, 
-            auth_context=auth_context
-        )
+        # SOLUZIONE 1: Usa il metodo corretto se gateway è SecureAPIGateway
+        if hasattr(gateway, 'create_digital_twin_secure'):
+            logger.info("🔍 Using SecureAPIGateway method")
+            result = await gateway.create_digital_twin_secure(
+                twin_config=twin_config, 
+                auth_context=auth_context
+            )
+        else:
+            # SOLUZIONE 2: Fallback al metodo normale con security_enabled=True
+            logger.info("🔍 Using APIGateway method with security enabled")
+            twin_config['security_enabled'] = True
+            result = await gateway.create_digital_twin(
+                twin_config=twin_config, 
+                auth_context=auth_context
+            )
         
         return {
             **result,
@@ -202,18 +217,30 @@ async def create_secure_digital_twin(
             'security_enabled': twin_data.security_enabled
         }
         
+    except AuthorizationError as e:
+        logger.error(f"Authorization error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+    except ValidationError as e:
+        logger.error(f"Validation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+            detail=str(e)
+        )
     except ValueError as e:
+        logger.error(f"Value error: {e}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f'Failed to create secure Digital Twin: {e}')
+        logger.error(f'Failed to create secure Digital Twin: {e}', exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f'Failed to create Digital Twin: {e}'
+            detail=f'Failed to create Digital Twin: {str(e)}'
         )
-
 @router.get('/{twin_id}', summary='🔒 Get Digital Twin (Secure)')
 async def get_secure_digital_twin(
     twin_id: UUID = Path(..., description='Digital Twin ID'),

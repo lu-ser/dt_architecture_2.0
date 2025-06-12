@@ -9,12 +9,102 @@ from src.core.interfaces.digital_twin import DigitalTwinType, DigitalTwinConfigu
 from src.core.interfaces.base import BaseMetadata
 from src.utils.exceptions import EntityCreationError, AuthorizationError, ValidationError
 from src.layers.application.auth.user_registration import Tenant
+from src.core.interfaces.digital_twin import TwinModelType
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SecureDigitalTwinFactory(DigitalTwinFactory):
     """Enhanced factory with security and tenant awareness"""
     
+    async def create_from_template_secure(self,
+                                     template_name: str,
+                                     owner_id: UUID, 
+                                     tenant_id: UUID,
+                                     customization: Optional[Dict[str, Any]] = None,
+                                     metadata: Optional[BaseMetadata] = None,
+                                     authorized_users: Optional[Dict[UUID, DTAccessLevel]] = None) -> SecureDigitalTwin:
+        """Create secure twin from template with ownership"""
+                
+        # Get template and apply customization
+        template = self._get_twin_template(template_name)
+        if not template:
+            raise ValidationError(f'Template {template_name} not found')
+                
+        if customization:
+            template = self._apply_template_customization(template, customization)
+        
+        try:
+            # Convert twin_type
+            twin_type = DigitalTwinType(template['twin_type'])
+            
+            # Convert capabilities
+            capabilities = set()
+            for cap in template['capabilities']:
+                capabilities.add(TwinCapability(cap))            
+            from src.core.interfaces.digital_twin import TwinModelType
+            
+            model_configs = {}
+            raw_model_configs = template.get('model_configurations', {})
+
+            for model_key, config in raw_model_configs.items():                
+                # Map string keys to TwinModelType enums
+                if model_key == "physics_based":
+                    model_configs[TwinModelType.PHYSICS_BASED] = config
+                elif model_key == "data_driven":
+                    model_configs[TwinModelType.DATA_DRIVEN] = config
+                elif model_key == "hybrid":
+                    model_configs[TwinModelType.HYBRID] = config
+                else:
+                    # Try to match enum values directly
+                    try:
+                        enum_key = TwinModelType(model_key)
+                        model_configs[enum_key] = config
+                    except ValueError:
+                        logger.warning(f" Unknown model configuration key: {model_key}, skipping")
+
+            logger.info(f"🔍 Final model configurations: {model_configs}")
+            
+            # Create configuration
+            config = DigitalTwinConfiguration(
+                twin_type=twin_type,
+                name=template['name'],
+                description=template['description'],
+                capabilities=capabilities,
+                model_configurations=model_configs,  # ✅ Now using proper enums!
+                data_sources=template.get('data_sources', []),
+                update_frequency=template.get('update_frequency', 60),
+                retention_policy=template.get('retention_policy', {}),
+                quality_requirements=template.get('quality_requirements', {}),
+                custom_config=template.get('custom_config', {})
+            )
+            
+            logger.info(f"🔍 Configuration created successfully")
+            
+            # Add template models
+            models = []
+            for model_template_id in template.get('model_templates', []):
+                if hasattr(self, '_model_templates') and model_template_id in self._model_templates:
+                    models.append(self._model_templates[model_template_id])
+            
+            # Create secure twin
+            result = await self.create_secure_twin(
+                twin_type=twin_type,
+                config=config,
+                owner_id=owner_id,
+                tenant_id=tenant_id,
+                models=models,
+                metadata=metadata,
+                initial_authorized_users=authorized_users
+            )
+            
+            logger.info(f"🔍 Secure twin created successfully: {result.id}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"🚨 Error in create_from_template_secure: {e}", exc_info=True)
+            raise ValidationError(f'Failed to create secure twin from template: {e}')
+        
     async def create_secure_twin(self, 
                                 twin_type: DigitalTwinType,
                                 config: DigitalTwinConfiguration, 
@@ -64,53 +154,6 @@ class SecureDigitalTwinFactory(DigitalTwinFactory):
             logger.error(f'Failed to create secure Digital Twin: {e}')
             raise EntityCreationError(f'Secure Digital Twin creation failed: {e}')
     
-    async def create_from_template_secure(self,
-                                         template_name: str,
-                                         owner_id: UUID, 
-                                         tenant_id: UUID,
-                                         customization: Optional[Dict[str, Any]] = None,
-                                         metadata: Optional[BaseMetadata] = None,
-                                         authorized_users: Optional[Dict[UUID, DTAccessLevel]] = None) -> SecureDigitalTwin:
-        """Create secure twin from template with ownership"""
-        
-        # Get template and apply customization
-        template = self._get_twin_template(template_name)
-        if not template:
-            raise ValidationError(f'Template {template_name} not found')
-        
-        if customization:
-            template = self._apply_template_customization(template, customization)
-        
-        # Create configuration
-        twin_type = DigitalTwinType(template['twin_type'])
-        config = DigitalTwinConfiguration(
-            twin_type=twin_type,
-            name=template['name'],
-            description=template['description'],
-            capabilities=set(TwinCapability(cap) for cap in template['capabilities']),
-            model_configurations=template.get('model_configurations', {}),
-            data_sources=template.get('data_sources', []),
-            update_frequency=template.get('update_frequency', 60),
-            retention_policy=template.get('retention_policy', {}),
-            quality_requirements=template.get('quality_requirements', {}),
-            custom_config=template.get('custom_config', {})
-        )
-        
-        # Add template models
-        models = []
-        for model_template_id in template.get('model_templates', []):
-            if model_template_id in self._model_templates:
-                models.append(self._model_templates[model_template_id])
-        
-        return await self.create_secure_twin(
-            twin_type=twin_type,
-            config=config,
-            owner_id=owner_id,
-            tenant_id=tenant_id,
-            models=models,
-            metadata=metadata,
-            initial_authorized_users=authorized_users
-        )
     
     async def create_shared_twin(self,
                                 twin_type: DigitalTwinType,

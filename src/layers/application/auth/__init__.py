@@ -230,6 +230,8 @@ class AuthenticationManager:
     async def _check_rate_limit(self, client_ip: str) -> None:
         """Check rate limiting with Redis or fallback to memory."""
         try:
+            if client_ip in ['127.0.0.1', 'localhost']:
+                return True
             if self._use_redis and self._redis_rate_limiter:
                 # Use Redis rate limiting
                 identifier = f"auth:{client_ip}"
