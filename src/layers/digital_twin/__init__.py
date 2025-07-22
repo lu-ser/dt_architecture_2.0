@@ -183,6 +183,7 @@ class DigitalTwinLayerOrchestrator:
             # Start layer orchestration
             await self._start_orchestration()
             
+            await self._restore_replica_associations()
             self._running = True
             logger.info("Digital Twin Layer started successfully")
             
@@ -216,6 +217,62 @@ class DigitalTwinLayerOrchestrator:
         except Exception as e:
             logger.error(f"Error stopping Digital Twin Layer: {e}")
     
+    async def _restore_replica_associations(self) -> None:
+        """Restore associations between Digital Twins and Replicas after restart."""
+        try:
+            logger.info("Restoring Digital Twin <-> Replica associations...")
+            
+            # Get all digital twins
+            twins = await self.registry.list()
+            
+            # Get all replicas from virtualization layer
+            if hasattr(self, 'virtualization_orchestrator') and self.virtualization_orchestrator:
+                v_registry = self.virtualization_orchestrator.registry
+                replicas = await v_registry.list()
+                
+                restored_count = 0
+                
+                for replica in replicas:
+                    try:
+                        # Get parent twin ID from replica
+                        parent_twin_id = None
+                        
+                        if hasattr(replica, 'parent_digital_twin_id'):
+                            parent_twin_id = replica.parent_digital_twin_id
+                        elif hasattr(replica, 'metadata') and replica.metadata:
+                            metadata_dict = replica.metadata.to_dict() if hasattr(replica.metadata, 'to_dict') else replica.metadata
+                            custom_data = metadata_dict.get('custom', {})
+                            parent_twin_id = custom_data.get('parent_twin_id')
+                            if isinstance(parent_twin_id, str):
+                                parent_twin_id = UUID(parent_twin_id)
+                        
+                        if parent_twin_id:
+                            # Check if twin exists
+                            twin_exists = any(str(twin.id) == str(parent_twin_id) for twin in twins)
+                            
+                            if twin_exists:
+                                # Restore association
+                                await self.associate_replica_with_twin(parent_twin_id, replica.id)
+                                restored_count += 1
+                                logger.debug(f"Restored association: Twin {parent_twin_id} <-> Replica {replica.id}")
+                            else:
+                                logger.warning(f"Parent twin {parent_twin_id} not found for replica {replica.id}")
+                        else:
+                            logger.warning(f"No parent twin ID found for replica {replica.id}")
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to restore association for replica {replica.id}: {e}")
+                        continue
+                
+                logger.info(f"Restored {restored_count} Digital Twin <-> Replica associations")
+            else:
+                logger.warning("Virtualization orchestrator not available for association restoration")
+                
+        except Exception as e:
+            logger.error(f"Failed to restore replica associations: {e}")
+            # Non-critical error, don't fail startup
+
+
     async def create_digital_twin(self, twin_type: DigitalTwinType, name: str, description: str, 
                                 capabilities: Set[TwinCapability], template_id: Optional[str] = None, 
                                 customization: Optional[Dict[str, Any]] = None, 
@@ -280,14 +337,29 @@ class DigitalTwinLayerOrchestrator:
         except Exception as e:
             logger.warning(f'Failed to setup twin storage for {twin_id}: {e}')
 
-    async def associate_replica_with_twin(self, twin_id: UUID, replica_id: UUID, 
-                                        data_mapping: Optional[Dict[str, str]] = None) -> None:
-        """Associate replica with enhanced caching."""
+    async def associate_replica_with_twin(
+        self, 
+        twin_id: UUID, 
+        replica_id: UUID, 
+        data_mapping: Optional[Dict[str, str]] = None
+    ) -> None:
+        """Associate replica with enhanced handling for wrapper objects."""
         try:
+            # Try to get the twin (might be a wrapper)
             twin = await self.registry.get_digital_twin(twin_id)
-            await twin.associate_replica(replica_id)
             
-            # Create association
+            # Check if twin has associate_replica method
+            if hasattr(twin, 'associate_replica') and callable(getattr(twin, 'associate_replica')):
+                try:
+                    await twin.associate_replica(replica_id)
+                    logger.info(f"Used twin.associate_replica() method")
+                except Exception as e:
+                    logger.warning(f"twin.associate_replica() failed: {e}")
+                    # Don't raise here, continue with fallback
+            else:
+                logger.info("Twin is wrapper object, using registry-based association")
+                
+            # Create association record in registry - USE EXISTING DigitalTwinAssociation
             association = DigitalTwinAssociation(
                 twin_id=twin_id,
                 associated_entity_id=replica_id,
@@ -295,27 +367,23 @@ class DigitalTwinLayerOrchestrator:
                 entity_type='digital_replica',
                 metadata={'data_mapping': data_mapping or {}}
             )
+            
             await self.registry.add_association(association)
+            logger.info(f"Association record created in DT registry")
             
             # Update data flow tracking
+            if not hasattr(self, 'data_flow_subscriptions'):
+                self.data_flow_subscriptions = {}
             if twin_id not in self.data_flow_subscriptions:
                 self.data_flow_subscriptions[twin_id] = set()
             self.data_flow_subscriptions[twin_id].add(replica_id)
-            
-            # NUOVO: Invalidate cache for twin (associations changed)
-            if self._registry_cache:
-                await self._registry_cache.invalidate_entity(twin_id, 'DigitalTwin')
-            
-            # Configure data routing
-            if self.virtualization_orchestrator:
-                await self._configure_data_routing(twin_id, replica_id)
             
             logger.info(f'Associated replica {replica_id} with Digital Twin {twin_id}')
             
         except Exception as e:
             logger.error(f'Failed to associate replica with twin: {e}')
             raise DigitalTwinError(f'Replica association failed: {e}')
-    
+        
     async def bind_service_to_twin(
         self,
         twin_id: UUID,
@@ -761,10 +829,20 @@ class DigitalTwinLayerOrchestrator:
         pass
     
     async def _configure_data_routing(self, twin_id: UUID, replica_id: UUID) -> None:
-        """Configure data routing from replica to twin."""
-        # This would configure the virtualization layer to route data
-        pass
-    
+        """Configure data routing between replica and twin."""
+        try:
+            # This would configure how data flows from replica to twin
+            # For now, just log the configuration
+            logger.info(f"Configuring data routing: replica {replica_id} -> twin {twin_id}")
+            
+            # In a full implementation, this might:
+            # - Set up message queues
+            # - Configure data transformation pipelines
+            # - Establish real-time data streaming
+            
+        except Exception as e:
+            logger.error(f"Data routing configuration failed: {e}")
+            raise
     async def _find_service_for_capability(self, twin_id: UUID, capability: TwinCapability) -> Optional[UUID]:
         """Find a service that can provide the requested capability."""
         # Get service associations

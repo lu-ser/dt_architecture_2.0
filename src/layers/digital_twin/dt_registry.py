@@ -21,6 +21,12 @@ from src.core.interfaces.digital_twin import (
     TwinSnapshot,
     TwinModel
 )
+
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set
+from uuid import UUID
+import logging
+
 from src.utils.exceptions import (
     DigitalTwinError,
     DigitalTwinNotFoundError,
@@ -172,6 +178,7 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         self.twin_performance_metrics = DigitalTwinPerformanceMetrics()
         self.model_registry: Dict[UUID, TwinSnapshot] = {}  # Semplificato per ora
         self.twin_snapshots: Dict[UUID, List[TwinSnapshot]] = {}
+        self._associations: Dict[str, DigitalTwinAssociation] = {}
         
         # Lock per operazioni concorrenti
         self._association_lock = asyncio.Lock()
@@ -201,12 +208,15 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         async with self._performance_lock:
             self.twin_performance_metrics.total_twins += 1
     
-    async def add_association(self, association) -> None:
-        """Aggiunge un'associazione tra twins"""
-        async with self._association_lock:
-            key = f"{association.twin_id}:{association.associated_entity_id}"
-            # Semplificato - memorizza solo la chiave per ora
-            logger.info(f"Added association: {key}")
+    async def add_association(self, association: DigitalTwinAssociation) -> None:
+        """Add an association between a Digital Twin and another entity."""
+        try:
+            association_key = f"{association.twin_id}:{association.associated_entity_id}:{association.association_type}"
+            self._associations[association_key] = association
+            logger.info(f"Association added: {association_key}")
+        except Exception as e:
+            logger.error(f"Failed to add association: {e}")
+            raise
     
     async def remove_association(
         self,
@@ -225,12 +235,26 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
             
             return False
     
-    async def get_twin_associations(self, twin_id: UUID, 
-                                  association_type: Optional[str] = None, 
-                                  entity_type: Optional[str] = None) -> List:
-        """Recupera associazioni per un twin"""
-        # Implementazione semplificata
-        return []
+    async def get_twin_associations(
+        self, 
+        twin_id: UUID, 
+        association_type: Optional[str] = None,
+        entity_type: Optional[str] = None
+    ) -> List[DigitalTwinAssociation]:
+        """Get associations for a specific Digital Twin."""
+        try:
+            associations = []
+            for key, association in self._associations.items():
+                if association.twin_id == twin_id:
+                    if association_type and association.association_type != association_type:
+                        continue
+                    if entity_type and association.entity_type != entity_type:
+                        continue
+                    associations.append(association)
+            return associations
+        except Exception as e:
+            logger.error(f"Failed to get twin associations: {e}")
+            return []
     
     async def add_twin_to_hierarchy(self, parent_twin_id: UUID, child_twin_id: UUID) -> None:
         """Aggiunge un twin alla gerarchia"""

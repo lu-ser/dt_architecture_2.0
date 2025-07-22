@@ -329,6 +329,92 @@ async def get_replica_devices(
             "generated_at": datetime.utcnow().isoformat()
         }
 
+@router.post("/{replica_id}/restore-association", summary="Restore Replica-DT Association")
+async def restore_replica_association(
+    replica_id: UUID = Path(..., description="Digital Replica ID"),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
+    """Restore association between replica and digital twin after restart."""
+    try:
+        # Get replica info
+        registry = gateway.virtualization_orchestrator.registry
+        replica = await registry.get_digital_replica(replica_id)
+        
+        if not replica:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Digital Replica {replica_id} not found"
+            )
+        
+        # Get parent twin ID from replica metadata
+        parent_twin_id = None
+        if hasattr(replica, 'parent_digital_twin_id'):
+            parent_twin_id = replica.parent_digital_twin_id
+        elif hasattr(replica, 'metadata') and replica.metadata:
+            metadata_dict = replica.metadata.to_dict() if hasattr(replica.metadata, 'to_dict') else replica.metadata
+            custom_data = metadata_dict.get('custom', {})
+            parent_twin_id = custom_data.get('parent_twin_id')
+            if isinstance(parent_twin_id, str):
+                parent_twin_id = UUID(parent_twin_id)
+        
+        if not parent_twin_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot determine parent Digital Twin ID from replica"
+            )
+        
+        # Restore association in Digital Twin orchestrator
+        dt_orchestrator = gateway.dt_orchestrator
+        await dt_orchestrator.associate_replica_with_twin(parent_twin_id, replica_id)
+        
+        # Re-create device associations
+        device_ids = getattr(replica, 'device_ids', [])
+        restored_devices = []
+        
+        for device_id in device_ids:
+            try:
+                # Check if association already exists
+                existing_associations = await registry.get_device_associations(device_id)
+                already_exists = any(
+                    assoc.replica_id == replica_id 
+                    for assoc in existing_associations
+                )
+                
+                if not already_exists:
+                    # Create new association
+                    from src.layers.virtualization.dr_registry import DeviceAssociation
+                    association = DeviceAssociation(
+                        device_id=device_id,
+                        replica_id=replica_id,
+                        association_type="managed"
+                    )
+                    await registry.associate_device(association)
+                    restored_devices.append(device_id)
+                else:
+                    logger.info(f"Association already exists for device {device_id}")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to restore device association {device_id}: {e}")
+        
+        return {
+            "replica_id": str(replica_id),
+            "parent_twin_id": str(parent_twin_id),
+            "association_restored": True,
+            "devices_restored": restored_devices,
+            "total_devices": len(device_ids),
+            "restored_at": datetime.now(timezone.utc).isoformat(),
+            "message": "Association restored successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to restore association for replica {replica_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Association restoration failed: {e}"
+        )
+
 @router.get("/{replica_id}/raw", summary="Get Raw Replica Data")
 async def get_raw_replica_data(
     replica_id: UUID = Path(..., description="Digital Replica ID"),

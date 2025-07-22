@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 import logging
-
 from src.core.registry.base import AbstractRegistry, RegistryMetrics
 from src.core.interfaces.base import IStorageAdapter, BaseMetadata
 from src.core.interfaces.digital_twin import (
@@ -210,6 +209,7 @@ class DigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         if initial_relationships:
             for relationship in initial_relationships:
                 await self.add_relationship(relationship)
+    
     
     async def get_digital_twin(self, twin_id: UUID) -> IDigitalTwin:
         """

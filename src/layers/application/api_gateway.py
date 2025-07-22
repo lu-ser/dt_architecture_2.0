@@ -75,6 +75,7 @@ class APIGateway:
     async def initialize(self) -> None:
         """Initialize the API Gateway and connect to layer orchestrators."""
         if self._initialized:
+            logger.warning("API Gateway already initialized")
             return
         
         try:
@@ -83,13 +84,143 @@ class APIGateway:
             # Connect to layer orchestrators
             await self._connect_to_layers()
             
+            try:
+                from src.layers.service.data_service_factory import DataServiceFactory
+                
+                if self.service_orchestrator:
+                    data_factory = DataServiceFactory(
+                        virtualization_orchestrator=self.virtualization_orchestrator
+                    )
+                    # Assuming service_orchestrator has a method to register factories
+                    if hasattr(self.service_orchestrator, 'register_service_factory'):
+                        self.service_orchestrator.register_service_factory("data_retrieval", data_factory)
+                        logger.info("Data service factory registered successfully")
+                    else:
+                        logger.warning("Service orchestrator doesn't support factory registration")
+                else:
+                    logger.warning("Service orchestrator not available for factory registration")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to register data service factory: {e}")
+                # Non-critical error, continue initialization
+            
             self._initialized = True
             logger.info("API Gateway initialization completed")
             
         except Exception as e:
             logger.error(f"Failed to initialize API Gateway: {e}")
-            raise APIGatewayError(f"Gateway initialization failed: {e}")
+            raise APIGatewayError(f"API Gateway initialization failed: {e}")
     
+    
+    async def associate_replica_with_twin(
+        self, 
+        twin_id: UUID, 
+        replica_id: UUID, 
+        data_mapping: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """Associate a Digital Replica with a Digital Twin."""
+        try:
+            # Use the Digital Twin orchestrator for association
+            if not self.dt_orchestrator:
+                raise APIGatewayError("Digital Twin orchestrator not available")
+            
+            await self.dt_orchestrator.associate_replica_with_twin(
+                twin_id, replica_id, data_mapping
+            )
+            
+            return {
+                "twin_id": str(twin_id),
+                "replica_id": str(replica_id),
+                "data_mapping": data_mapping,
+                "status": "associated",
+                "associated_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to associate replica {replica_id} with twin {twin_id}: {e}")
+            raise APIGatewayError(f"Replica association failed: {e}")
+
+    
+    async def restore_all_associations(self) -> Dict[str, Any]:
+        """Restore all associations after system restart."""
+        try:
+            logger.info("Starting system-wide association restoration...")
+            
+            results = {
+                "replica_associations": 0,
+                "device_associations": 0,
+                "service_bindings": 0,
+                "errors": []
+            }
+            
+            # 1. Restore Digital Twin <-> Replica associations
+            if self.dt_orchestrator and self.virtualization_orchestrator:
+                try:
+                    await self.dt_orchestrator._restore_replica_associations()
+                    
+                    # Count restored associations
+                    twins = await self.dt_orchestrator.registry.list()
+                    replicas = await self.virtualization_orchestrator.registry.list()
+                    
+                    for replica in replicas:
+                        parent_twin_id = getattr(replica, 'parent_digital_twin_id', None)
+                        if parent_twin_id:
+                            results["replica_associations"] += 1
+                            
+                except Exception as e:
+                    error_msg = f"Failed to restore replica associations: {e}"
+                    logger.error(error_msg)
+                    results["errors"].append(error_msg)
+            
+            # 2. Restore Device <-> Replica associations
+            if self.virtualization_orchestrator:
+                try:
+                    registry = self.virtualization_orchestrator.registry
+                    replicas = await registry.list()
+                    
+                    for replica in replicas:
+                        device_ids = getattr(replica, 'device_ids', [])
+                        for device_id in device_ids:
+                            # Check if association exists, create if not
+                            existing = await registry.get_device_associations(device_id)
+                            replica_associated = any(
+                                assoc.replica_id == replica.id 
+                                for assoc in existing
+                            )
+                            
+                            if not replica_associated:
+                                from src.layers.virtualization.dr_registry import DeviceAssociation
+                                association = DeviceAssociation(
+                                    device_id=device_id,
+                                    replica_id=replica.id,
+                                    association_type="managed"
+                                )
+                                await registry.associate_device(association)
+                                results["device_associations"] += 1
+                                
+                except Exception as e:
+                    error_msg = f"Failed to restore device associations: {e}"
+                    logger.error(error_msg)
+                    results["errors"].append(error_msg)
+            
+            results["status"] = "completed"
+            results["total_restored"] = (
+                results["replica_associations"] + 
+                results["device_associations"] + 
+                results["service_bindings"]
+            )
+            
+            logger.info(f"Association restoration completed: {results}")
+            return results
+            
+        except Exception as e:
+            logger.error(f"System-wide association restoration failed: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "total_restored": 0
+            }
+
     async def _connect_to_layers(self) -> None:
         """Connect to all platform layer orchestrators."""
         try:
