@@ -931,69 +931,6 @@ class DigitalTwinFactory(IDigitalTwinFactory):
         
         return templates
 
-    def _get_hardcoded_templates(self) -> Dict[str, Dict[str, Any]]:
-        """Get hardcoded templates for fallback."""
-        return {
-            "industrial_asset": {
-                "twin_type": DigitalTwinType.ASSET.value,
-                "name": "Industrial Asset Twin",
-                "description": "Digital Twin for industrial assets with monitoring and prediction",
-                "capabilities": [
-                    TwinCapability.MONITORING.value,
-                    TwinCapability.ANALYTICS.value,
-                    TwinCapability.PREDICTION.value,
-                    TwinCapability.MAINTENANCE_PLANNING.value
-                ],
-                "model_configurations": {
-                    TwinModelType.PHYSICS_BASED.value: {"enabled": True},
-                    TwinModelType.DATA_DRIVEN.value: {"enabled": True}
-                },
-                "data_sources": ["sensors", "maintenance_logs", "operational_data"],
-                "update_frequency": 30,
-                "model_templates": ["basic_physics", "basic_ml"]
-            },
-            "smart_building": {
-                "twin_type": DigitalTwinType.INFRASTRUCTURE.value,
-                "name": "Smart Building Twin",
-                "description": "Digital Twin for smart building management",
-                "capabilities": [
-                    TwinCapability.MONITORING.value,
-                    TwinCapability.OPTIMIZATION.value,
-                    TwinCapability.CONTROL.value
-                ],
-                "model_configurations": {
-                    TwinModelType.HYBRID.value: {"enabled": True}
-                },
-                "data_sources": ["hvac_sensors", "occupancy_sensors", "energy_meters"],
-                "update_frequency": 60,
-                "model_templates": ["basic_physics"]
-            },
-            "user_smartwatch": {
-                "twin_type": DigitalTwinType.USER.value,  # ← Potrebbe dover essere DigitalTwinType.ASSET.value
-                "name": "User Smartwatch Twin",
-                "description": "Digital Twin for user wearable devices with health monitoring",
-                "capabilities": [
-                    TwinCapability.MONITORING.value,
-                    TwinCapability.ANALYTICS.value,
-                    TwinCapability.PREDICTION.value,
-                    TwinCapability.ANOMALY_DETECTION.value
-                ],
-                "model_configurations": {
-                    TwinModelType.DATA_DRIVEN.value: {"enabled": True}
-                },
-                "data_sources": [
-                    "heart_rate_sensor", "accelerometer", "gyroscope",
-                    "gps_location", "sleep_sensor", "stress_sensor"
-                ],
-                "update_frequency": 5,
-                "quality_requirements": {
-                    "min_quality": 0.85,
-                    "alert_threshold": 0.7
-                },
-                "model_templates": ["basic_ml"]
-            }
-        }
-
     async def _load_from_ontology_manager(self) -> None:
         """Load templates from OntologyManager."""
         try:

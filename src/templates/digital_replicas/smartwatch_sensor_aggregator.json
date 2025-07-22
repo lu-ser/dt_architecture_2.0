@@ -1,0 +1,64 @@
+{
+    "template_id": "smartwatch_sensor_aggregator",
+    "name": "Smartwatch Sensor Aggregator",
+    "template_type": "digital_replica",
+    "version": "1.0.0",
+    "description": "Template per aggregazione dati smartwatch con monitoraggio cardiaco",
+    "ontology_classes": [
+        "WearableDevice",
+        "HealthSensor"
+    ],
+    "configuration": {
+        "replica_type": "sensor_aggregator",
+        "aggregation_mode": "real_time",
+        "aggregation_config": {
+            "method": "time_weighted_average",
+            "window_size": 300,
+            "quality_validation": true,
+            "anomaly_detection": true,
+            "batch_size": 1
+        },
+        "data_retention_policy": {
+            "retention_days": 90,
+            "high_frequency_retention_hours": 72,
+            "compress_after_hours": 24
+        },
+        "quality_thresholds": {
+            "min_quality": 0.85,
+            "warning_threshold": 0.80
+        },
+        "device_constraints": {
+            "max_devices": 3,
+            "supported_protocols": [
+                "bluetooth_le",
+                "wifi"
+            ],
+            "data_types": [
+                "heart_rate",
+                "activity_data"
+            ],
+            "real_time_required": true
+        }
+    },
+    "metadata": {
+        "allowed_override_keys": [
+            "aggregation_config.window_size",
+            "quality_thresholds.min_quality",
+            "data_retention_policy.retention_days"
+        ],
+        "required_keys": [
+            "replica_type",
+            "aggregation_mode"
+        ],
+        "tags": [
+            "smartwatch",
+            "health",
+            "real-time"
+        ],
+        "use_cases": [
+            "Health monitoring",
+            "Fitness tracking"
+        ],
+        "author": "Healthcare IoT Team"
+    }
+}

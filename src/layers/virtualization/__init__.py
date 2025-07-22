@@ -66,7 +66,16 @@ class VirtualizationLayerOrchestrator:
     
     def __init__(self, base_templates_path: Optional[Path] = None):
         self.config = get_config()
-        self.base_templates_path = base_templates_path or Path("templates")
+        self.base_templates_path = base_templates_path or Path("src/templates")
+        logger.info(f"🔍 [DEBUG] Template path: {self.base_templates_path}")
+        logger.info(f"🔍 [DEBUG] Template path absolute: {self.base_templates_path.absolute()}")
+        logger.info(f"🔍 [DEBUG] Template path exists: {self.base_templates_path.exists()}")
+        digital_replicas_path = self.base_templates_path / "digital_replicas"
+        logger.info(f"🔍 [DEBUG] Digital replicas path: {digital_replicas_path}")
+        logger.info(f"🔍 [DEBUG] Digital replicas exists: {digital_replicas_path.exists()}")
+        if digital_replicas_path.exists():
+            json_files = list(digital_replicas_path.glob("*.json"))
+            logger.info(f"🔍 [DEBUG] Found {len(json_files)} JSON files: {[f.name for f in json_files]}")
         
         # Initialize components
         self.ontology_manager: Optional[OntologyManager] = None
@@ -441,6 +450,7 @@ class VirtualizationLayerOrchestrator:
                 templates.append(template.to_dict())
         
         return templates
+
     
     async def get_available_ontologies(self) -> List[Dict[str, Any]]:
         """Get available ontologies with their information."""

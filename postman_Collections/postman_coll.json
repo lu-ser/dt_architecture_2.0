@@ -1,0 +1,722 @@
+{
+    "info": {
+        "name": "Digital Twin Smartwatch - Heart Rate Sensor (CON AUTH)",
+        "description": "🔐 Collezione COMPLETA con autenticazione per creare un Digital Twin smartwatch\n\n🚀 PROCEDURA CORRETTA:\n1. 📝 REGISTRA utente\n2. 🔐 LOGIN per ottenere token\n3. 🏭 Crea Digital Twin \n4. 🔧 Crea Replica (con template esistenti!)\n5. 🔗 Associa Replica al Twin\n6. 💓 Invia dati battiti cardiaci\n\n⚠️ IMPORTANTE: Ogni richiesta dopo il login usa automaticamente il Bearer token!",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        {
+            "key": "base_url",
+            "value": "http://localhost:8000"
+        },
+        {
+            "key": "access_token",
+            "value": ""
+        },
+        {
+            "key": "user_id",
+            "value": ""
+        },
+        {
+            "key": "tenant_id",
+            "value": ""
+        },
+        {
+            "key": "twin_id",
+            "value": ""
+        },
+        {
+            "key": "replica_id",
+            "value": ""
+        }
+    ],
+    "auth": {
+        "type": "bearer",
+        "bearer": [
+            {
+                "key": "token",
+                "value": "{{access_token}}",
+                "type": "string"
+            }
+        ]
+    },
+    "item": [
+        {
+            "name": "🔍 Health Check",
+            "request": {
+                "auth": {
+                    "type": "noauth"
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/health",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "health"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "📋 Get API Info",
+            "request": {
+                "auth": {
+                    "type": "noauth"
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/api/v1",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "1. 📝 REGISTER User",
+            "request": {
+                "auth": {
+                    "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/auth/register",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "auth",
+                        "register"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"username\": \"smartwatch_user\",\n  \"email\": \"user@smartwatch.test\",\n  \"password\": \"SecurePass123!\",\n  \"first_name\": \"Mario\",\n  \"last_name\": \"Rossi\",\n  \"company_name\": \"SmartWatch Corp\",\n  \"plan\": \"pro\"\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 200 || pm.response.code === 201) {",
+                            "    var response = pm.response.json();",
+                            "    ",
+                            "    if (response.user_id) {",
+                            "        pm.collectionVariables.set('user_id', response.user_id);",
+                            "        console.log('✅ User registrato con ID:', response.user_id);",
+                            "    }",
+                            "    ",
+                            "    if (response.tenant_id) {",
+                            "        pm.collectionVariables.set('tenant_id', response.tenant_id);",
+                            "        console.log('✅ Tenant creato con ID:', response.tenant_id);",
+                            "    }",
+                            "    ",
+                            "    if (response.tokens && response.tokens.access_token) {",
+                            "        pm.collectionVariables.set('access_token', response.tokens.access_token);",
+                            "        console.log('✅ Token salvato automaticamente!');",
+                            "    }",
+                            "    ",
+                            "    console.log('🎉 Registrazione completata! Ora fai il LOGIN.');",
+                            "} else {",
+                            "    console.log('❌ Errore registrazione. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "2. 🔐 LOGIN User",
+            "request": {
+                "auth": {
+                    "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/auth/login",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "auth",
+                        "login"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"username\": \"smartwatch_user\",\n  \"password\": \"SecurePass123!\"\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 200) {",
+                            "    var response = pm.response.json();",
+                            "    ",
+                            "    // Salva token per tutte le richieste successive",
+                            "    if (response.access_token) {",
+                            "        pm.collectionVariables.set('access_token', response.access_token);",
+                            "        console.log('🔐 ACCESS TOKEN salvato!');",
+                            "        console.log('Token:', response.access_token.substring(0, 20) + '...');",
+                            "    }",
+                            "    ",
+                            "    // Salva info utente e tenant",
+                            "    if (response.user && response.user.user_id) {",
+                            "        pm.collectionVariables.set('user_id', response.user.user_id);",
+                            "    }",
+                            "    ",
+                            "    if (response.tenant && response.tenant.tenant_id) {",
+                            "        pm.collectionVariables.set('tenant_id', response.tenant.tenant_id);",
+                            "    }",
+                            "    ",
+                            "    console.log('🎉 LOGIN SUCCESS! Ora tutte le richieste useranno automaticamente il Bearer token.');",
+                            "    console.log('▶️ Puoi procedere con \"Create Digital Twin\"');",
+                            "    ",
+                            "} else {",
+                            "    console.log('❌ LOGIN FAILED. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "    console.log('💡 Assicurati di aver fatto prima la REGISTRAZIONE');",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "📋 Get Available Templates",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/replicas/templates/available",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "replicas",
+                        "templates",
+                        "available"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "🔍 Debug - Show All Variables",
+            "request": {
+                "auth": {
+                    "type": "noauth"
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/health",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "health"
+                    ]
+                }
+            },
+            "event": [
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "console.log('=== 🔍 DEBUG VARIABLES ===');",
+                            "console.log('🔐 access_token:', pm.collectionVariables.get('access_token') ? 'SET ✅' : 'MISSING ❌');",
+                            "console.log('👤 user_id:', pm.collectionVariables.get('user_id') || 'MISSING ❌');",
+                            "console.log('🏢 tenant_id:', pm.collectionVariables.get('tenant_id') || 'MISSING ❌');",
+                            "console.log('🏭 twin_id:', pm.collectionVariables.get('twin_id') || 'MISSING ❌');",
+                            "console.log('🔧 replica_id:', pm.collectionVariables.get('replica_id') || 'MISSING ❌');",
+                            "console.log('🌐 base_url:', pm.collectionVariables.get('base_url'));",
+                            "",
+                            "console.log('=== 📝 PROSSIMI PASSI ===');",
+                            "if (!pm.collectionVariables.get('access_token')) {",
+                            "    console.log('1️⃣ REGISTER User → LOGIN User');",
+                            "} else if (!pm.collectionVariables.get('twin_id')) {",
+                            "    console.log('2️⃣ Create Digital Twin');",
+                            "} else if (!pm.collectionVariables.get('replica_id')) {",
+                            "    console.log('3️⃣ Create Replica');",
+                            "} else {",
+                            "    console.log('4️⃣ Send Heart Rate Data');",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "3. 🏭 Create Digital Twin Smartwatch",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/digital-twins",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "digital-twins"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"twin_type\": \"asset\",\n  \"name\": \"My Smartwatch Digital Twin\",\n  \"description\": \"Digital Twin del mio smartwatch per monitoraggio battiti cardiaci\",\n  \"capabilities\": [\n    \"monitoring\",\n    \"analytics\",\n    \"prediction\",\n    \"anomaly_detection\"\n  ],\n  \"model_configurations\": {\n    \"data_driven\": {\"enabled\": true}\n  },\n  \"data_sources\": [\n    \"heart_rate_sensor\",\n    \"accelerometer\",\n    \"gyroscope\"\n  ],\n  \"update_frequency\": 5,\n  \"quality_requirements\": {\n    \"min_quality\": 0.85,\n    \"alert_threshold\": 0.7\n  },\n  \"retention_policy\": {\n    \"retention_days\": 30,\n    \"archive_after_days\": 7\n  },\n  \"custom_config\": {\n    \"device_type\": \"smartwatch\",\n    \"sensor_types\": [\"heart_rate\", \"motion\"],\n    \"health_monitoring\": true\n  }\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var token = pm.collectionVariables.get('access_token');",
+                            "if (!token) {",
+                            "    console.log('❌ ERRORE: access_token mancante!');",
+                            "    console.log('🔄 Fai prima LOGIN per ottenere il token');",
+                            "    throw new Error('access_token mancante - fai prima il LOGIN');",
+                            "} else {",
+                            "    console.log('✅ Token presente, procedo con la creazione del Digital Twin...');",
+                            "}"
+                        ]
+                    }
+                },
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 201 || pm.response.code === 200) {",
+                            "    var response = pm.response.json();",
+                            "    var twinId = response.id || response.twin_id || response.entity_id;",
+                            "    ",
+                            "    if (twinId) {",
+                            "        pm.collectionVariables.set('twin_id', twinId);",
+                            "        console.log('🏭 Digital Twin creato con ID:', twinId);",
+                            "        console.log('▶️ Ora puoi creare la Replica!');",
+                            "    } else {",
+                            "        console.log('❌ Nessun ID trovato nella risposta:', JSON.stringify(response));",
+                            "    }",
+                            "} else {",
+                            "    console.log('❌ Errore creazione Digital Twin. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "    ",
+                            "    if (pm.response.code === 401) {",
+                            "        console.log('🔐 ERRORE AUTH: Token scaduto o invalido. Rifai il LOGIN!');",
+                            "    }",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "4A. 🔧 Create Replica (template: test_iot_sensor)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/replicas",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "replicas"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"replica_type\": \"sensor_aggregator\",\n  \"template_id\": \"test_iot_sensor\",\n  \"parent_digital_twin_id\": \"{{twin_id}}\",\n  \"device_ids\": [\"smartwatch-hr-001\"],\n  \"aggregation_mode\": \"real_time\",\n  \"overrides\": {\n    \"aggregation_config\": {\n      \"batch_size\": 1,\n      \"method\": \"latest\",\n      \"window_seconds\": 5\n    },\n    \"data_retention_policy\": {\n      \"retention_days\": 30\n    },\n    \"quality_thresholds\": {\n      \"min_quality\": 0.8\n    }\n  }\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var token = pm.collectionVariables.get('access_token');",
+                            "var twinId = pm.collectionVariables.get('twin_id');",
+                            "",
+                            "if (!token) {",
+                            "    throw new Error('access_token mancante - fai LOGIN');",
+                            "}",
+                            "if (!twinId) {",
+                            "    throw new Error('twin_id mancante - crea prima il Digital Twin');",
+                            "}",
+                            "",
+                            "console.log('✅ Creando replica con template test_iot_sensor...');"
+                        ]
+                    }
+                },
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 201 || pm.response.code === 200) {",
+                            "    var response = pm.response.json();",
+                            "    var replicaId = response.id || response.replica_id || response.entity_id;",
+                            "    ",
+                            "    if (replicaId) {",
+                            "        pm.collectionVariables.set('replica_id', replicaId);",
+                            "        console.log('🔧 Replica con TEMPLATE creata con ID:', replicaId);",
+                            "        console.log('▶️ Ora puoi associarla al Twin e inviare dati!');",
+                            "    }",
+                            "} else {",
+                            "    console.log('❌ Errore replica con template. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "    console.log('💡 Prova la richiesta 4B (senza template)');",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "4B. 🔧 Create Replica (senza template)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/replicas",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "replicas"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"replica_type\": \"sensor_aggregator\",\n  \"parent_digital_twin_id\": \"{{twin_id}}\",\n  \"device_ids\": [\"smartwatch-hr-001\"],\n  \"aggregation_mode\": \"real_time\",\n  \"aggregation_config\": {\n    \"window_size\": 5,\n    \"aggregation_method\": \"latest\"\n  },\n  \"data_retention_policy\": {\n    \"retention_days\": 30\n  },\n  \"quality_thresholds\": {\n    \"min_quality\": 0.8\n  }\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var token = pm.collectionVariables.get('access_token');",
+                            "var twinId = pm.collectionVariables.get('twin_id');",
+                            "",
+                            "if (!token) throw new Error('access_token mancante');",
+                            "if (!twinId) throw new Error('twin_id mancante');",
+                            "",
+                            "console.log('✅ Creando replica SENZA template...');"
+                        ]
+                    }
+                },
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 201 || pm.response.code === 200) {",
+                            "    var response = pm.response.json();",
+                            "    var replicaId = response.id || response.replica_id || response.entity_id;",
+                            "    ",
+                            "    if (replicaId) {",
+                            "        pm.collectionVariables.set('replica_id', replicaId);",
+                            "        console.log('🔧 Replica SENZA TEMPLATE creata con ID:', replicaId);",
+                            "    }",
+                            "} else {",
+                            "    console.log('❌ Errore replica senza template. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "5. 🔗 Associate Replica to Twin",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/digital-twins/{{twin_id}}/replicas/{{replica_id}}",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "digital-twins",
+                        "{{twin_id}}",
+                        "replicas",
+                        "{{replica_id}}"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"data_mapping\": {\n    \"heart_rate\": \"sensor_value\",\n    \"timestamp\": \"measurement_time\",\n    \"quality\": \"data_quality\"\n  },\n  \"association_type\": \"data_source\"\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var token = pm.collectionVariables.get('access_token');",
+                            "var twinId = pm.collectionVariables.get('twin_id');",
+                            "var replicaId = pm.collectionVariables.get('replica_id');",
+                            "",
+                            "if (!token) throw new Error('access_token mancante');",
+                            "if (!twinId) throw new Error('twin_id mancante');",
+                            "if (!replicaId) throw new Error('replica_id mancante');",
+                            "",
+                            "console.log('🔗 Associando Replica', replicaId, 'al Twin', twinId);"
+                        ]
+                    }
+                },
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 201 || pm.response.code === 200) {",
+                            "    console.log('🔗 Associazione completata!');",
+                            "    console.log('▶️ Ora puoi inviare dati battiti cardiaci!');",
+                            "} else {",
+                            "    console.log('❌ Errore associazione. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "6. 💓 Send Heart Rate Data",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/replicas/{{replica_id}}/data",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "replicas",
+                        "{{replica_id}}",
+                        "data"
+                    ]
+                },
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"device_id\": \"smartwatch-hr-001\",\n  \"data\": {\n    \"timestamp\": \"{{$isoTimestamp}}\",\n    \"value\": {{heart_rate}},\n    \"unit\": \"bpm\",\n    \"quality\": {{data_quality}},\n    \"dataType\": \"heart_rate\",\n    \"sensor_type\": \"optical_ppg\",\n    \"measurement_context\": {\n      \"activity_level\": \"{{activity_level}}\",\n      \"user_state\": \"awake\"\n    }\n  },\n  \"metadata\": {\n    \"battery_level\": {{battery_level}},\n    \"signal_strength\": \"strong\",\n    \"firmware_version\": \"1.2.3\"\n  }\n}"
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var token = pm.collectionVariables.get('access_token');",
+                            "var replicaId = pm.collectionVariables.get('replica_id');",
+                            "",
+                            "if (!token) throw new Error('access_token mancante');",
+                            "if (!replicaId) throw new Error('replica_id mancante');",
+                            "",
+                            "// Genera battiti cardiaci realistici (60-100 bpm)",
+                            "var activities = ['resting', 'walking', 'light_exercise'];",
+                            "var activity = activities[Math.floor(Math.random() * activities.length)];",
+                            "pm.globals.set('activity_level', activity);",
+                            "",
+                            "var heartRate;",
+                            "switch(activity) {",
+                            "    case 'resting': heartRate = Math.floor(Math.random() * 21) + 60; break;",
+                            "    case 'walking': heartRate = Math.floor(Math.random() * 31) + 80; break;",
+                            "    case 'light_exercise': heartRate = Math.floor(Math.random() * 41) + 100; break;",
+                            "}",
+                            "pm.globals.set('heart_rate', heartRate);",
+                            "",
+                            "// Genera qualità dati e batteria",
+                            "var quality = (Math.random() * 0.18 + 0.80).toFixed(2);",
+                            "var battery = (Math.random() * 0.80 + 0.20).toFixed(2);",
+                            "pm.globals.set('data_quality', quality);",
+                            "pm.globals.set('battery_level', battery);",
+                            "",
+                            "console.log('💓 Inviando HR:', heartRate, 'bpm (', activity, ') - Quality:', quality);"
+                        ]
+                    }
+                },
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "if (pm.response.code === 200 || pm.response.code === 201) {",
+                            "    console.log('💓 Dati battiti cardiaci inviati con successo!');",
+                            "    console.log('Heart Rate:', pm.globals.get('heart_rate'), 'bpm');",
+                            "    console.log('Activity:', pm.globals.get('activity_level'));",
+                            "    console.log('Quality:', pm.globals.get('data_quality'));",
+                            "    console.log('🔄 Puoi ripetere questa richiesta per inviare più dati!');",
+                            "} else {",
+                            "    console.log('❌ Errore invio dati. Status:', pm.response.code);",
+                            "    console.log('Response:', pm.response.text());",
+                            "}"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "7. 📊 Get Twin Status",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/digital-twins/{{twin_id}}",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "digital-twins",
+                        "{{twin_id}}"
+                    ]
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var twinId = pm.collectionVariables.get('twin_id');",
+                            "if (!twinId) throw new Error('twin_id mancante');"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "8. 📈 Get Data Quality Report",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/replicas/{{replica_id}}/data/quality?time_range=3600",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "replicas",
+                        "{{replica_id}}",
+                        "data",
+                        "quality"
+                    ],
+                    "query": [
+                        {
+                            "key": "time_range",
+                            "value": "3600"
+                        }
+                    ]
+                }
+            },
+            "event": [
+                {
+                    "listen": "pre-request",
+                    "script": {
+                        "exec": [
+                            "var replicaId = pm.collectionVariables.get('replica_id');",
+                            "if (!replicaId) throw new Error('replica_id mancante');"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "🚪 LOGOUT",
+            "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                    "raw": "{{base_url}}/api/v1/auth/logout",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "auth",
+                        "logout"
+                    ]
+                }
+            },
+            "event": [
+                {
+                    "listen": "test",
+                    "script": {
+                        "exec": [
+                            "// Pulisce tutti i token",
+                            "pm.collectionVariables.set('access_token', '');",
+                            "console.log('🚪 Logout completato. Token rimosso.');"
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+}

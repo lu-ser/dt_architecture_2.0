@@ -26,24 +26,24 @@ class SecureDigitalTwinFactory(DigitalTwinFactory):
                                  authorized_users: Optional[Dict[UUID, DTAccessLevel]] = None) -> SecureDigitalTwin:
         """Create secure twin from template with ownership"""
                 
-        template = self._get_twin_template(template_name)
+        template = self._get_twin_template_sync(template_name)
         if not template:
             available_templates = self.get_available_templates()
             raise ValidationError(f'Template {template_name} not found. Available: {available_templates}')
                 
-        logger.info(f"🔍 Found template: {template_name}")
-        logger.info(f"🔍 Template type: {template.get('twin_type')}")
-        logger.info(f"🔍 Template capabilities: {template.get('capabilities')}")
+        logger.info(f"Found template: {template_name}")
+        logger.info(f"Template type: {template.get('twin_type')}")
+        logger.info(f"Template capabilities: {template.get('capabilities')}")
         
         # Apply customization if provided
         if customization:
-            logger.info(f"🔍 Applying customization: {list(customization.keys())}")
+            logger.info(f"Applying customization: {list(customization.keys())}")
             template = self._apply_template_customization(template, customization)
         
         try:
             # Convert twin_type
             twin_type = DigitalTwinType(template['twin_type'])
-            logger.info(f"🔍 Twin type: {twin_type}")
+            logger.info(f"Twin type: {twin_type}")
             
             # Convert capabilities
             capabilities = set()
@@ -53,7 +53,7 @@ class SecureDigitalTwinFactory(DigitalTwinFactory):
                 except ValueError as e:
                     logger.warning(f"Invalid capability {cap}: {e}")
                     
-            logger.info(f"🔍 Capabilities: {capabilities}")
+            logger.info(f"Capabilities: {capabilities}")
             
             # Process model configurations
             model_configs = {}

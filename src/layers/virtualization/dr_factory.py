@@ -607,21 +607,19 @@ class DigitalReplicaFactory(IReplicaFactory):
         logger.info(f"Registered aggregator type: {name}")
     
     def _get_template(self, template_id: str) -> Optional[Dict[str, Any]]:
-        """Get a predefined template by ID."""
-        templates = {
-            "iot_sensor": {
-                "replica_type": ReplicaType.SENSOR_AGGREGATOR.value,
-                "aggregation_mode": DataAggregationMode.BATCH.value,
-                "aggregation_config": {"batch_size": 5, "method": "average"},
-                "data_retention_policy": {"retention_days": 30},
-                "quality_thresholds": {"min_quality": 0.7}
-            },
-            "industrial_device": {
-                "replica_type": ReplicaType.DEVICE_PROXY.value,
-                "aggregation_mode": DataAggregationMode.REAL_TIME.value,
-                "aggregation_config": {"method": "latest"},
-                "data_retention_policy": {"retention_days": 90},
-                "quality_thresholds": {"min_quality": 0.9}
-            }
-        }
-        return templates.get(template_id)
+        """Get a template from OntologyManager (NO MORE HARDCODING!)."""
+        try:
+            from src.layers.virtualization.ontology.manager import get_ontology_manager
+            
+            ontology_manager = get_ontology_manager()
+            template = ontology_manager.get_template(template_id)
+            
+            if template and template.configuration:
+                return template.configuration
+            
+            logger.warning(f"Template {template_id} not found in OntologyManager")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get template {template_id} from OntologyManager: {e}")
+            return None

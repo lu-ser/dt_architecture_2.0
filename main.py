@@ -350,7 +350,7 @@ class DigitalTwinPlatform:
             # 1. Initialize Virtualization Layer (handles Digital Replicas)
             logger.info("Initializing Virtualization Layer...")
             from src.layers.virtualization import initialize_virtualization_layer
-            self.virtualization_orchestrator = await initialize_virtualization_layer()
+            self.virtualization_orchestrator = await initialize_virtualization_layer(Path("src/templates"))
             
             # 2. Initialize Service Layer (provides capabilities)
             logger.info("Initializing Service Layer...")
