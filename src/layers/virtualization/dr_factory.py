@@ -235,7 +235,9 @@ class DigitalReplica(IDigitalReplica):
         logger.info(f"Digital Replica {self._id} terminated")
     
     async def receive_device_data(self, device_data: DeviceData) -> None:
-        """Receive data from a physical device."""
+        """
+        Receive data from a physical device with MongoDB persistence.
+        """
         if device_data.device_id not in self._configuration.device_ids:
             logger.warning(f"Received data from unknown device {device_data.device_id}")
             return
@@ -244,13 +246,66 @@ class DigitalReplica(IDigitalReplica):
         quality = self._aggregator.validate_data(device_data)
         device_data.quality = quality
         
-        async with self._data_lock:
-            self._pending_data.append(device_data)
-            self._data_received_count += 1
-        
-        # Check if we should trigger aggregation
-        await self._check_aggregation_trigger()
-    
+        try:
+            #STEP 1: SAVE TO MONGODB
+            from src.core.entities.device_data import DeviceDataEntity
+            from src.storage import get_twin_storage_adapter
+            
+            # Get MongoDB adapter for this twin's database
+            storage_adapter = get_twin_storage_adapter(DeviceDataEntity, self._configuration.parent_digital_twin_id)
+            
+            # Create device data entity
+            device_data_entity = DeviceDataEntity.from_device_data(
+                device_data, 
+                self._id,
+                additional_metadata={
+                    "received_at": datetime.now(timezone.utc).isoformat(),
+                    "aggregation_mode": self._configuration.aggregation_mode.value,
+                    "replica_type": self._configuration.replica_type.value
+                }
+            )
+            
+            # Save to MongoDB
+            await storage_adapter.save(device_data_entity)
+            logger.info(f"💾 Saved device data from {device_data.device_id} to MongoDB")
+            
+            # 🔥 STEP 2: CACHE IN REDIS for fast access
+            try:
+                from src.storage.adapters.redis_cache import get_redis_cache
+                redis_cache = await get_redis_cache()
+                
+                # Cache latest data per device
+                cache_key = f"latest_device_data:{device_data.device_id}:{self._id}"
+                await redis_cache.set(
+                    cache_key, 
+                    device_data_entity.to_dict(), 
+                    ttl=3600,  # 1 hour
+                    namespace="device_data"
+                )
+                logger.debug(f"🚀 Cached device data in Redis: {cache_key}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to cache device data in Redis: {e}")
+                # Continue without Redis cache
+            
+            # 🔥 STEP 3: Update in-memory tracking
+            async with self._data_lock:
+                self._pending_data.append(device_data)
+                self._data_received_count += 1
+            
+            # 🔥 STEP 4: Check if we should trigger aggregation
+            await self._check_aggregation_trigger()
+            
+            logger.info(f"✅ Successfully processed device data from {device_data.device_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to process device data from {device_data.device_id}: {e}")
+            # Don't raise - we want to be resilient
+            # But still track the data in memory as fallback
+            async with self._data_lock:
+                self._pending_data.append(device_data)
+                self._data_received_count += 1
+
     async def aggregate_data(
         self,
         data_batch: List[DeviceData],

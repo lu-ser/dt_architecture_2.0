@@ -69,7 +69,7 @@ class DataRetrievalService(IService):
         self._metadata = metadata
         self.virtualization_orchestrator = virtualization_orchestrator
         self._status = EntityStatus.CREATED
-        self._service_type = ServiceType.DATA_PROCESSING
+        self._service_type = ServiceType.AGGREGATION
         self._priority = ServicePriority.NORMAL
         
         self._execution_count = 0
@@ -292,12 +292,13 @@ class DataRetrievalService(IService):
         """Parse input data into DataRetrievalQuery."""
         replica_id = UUID(input_data["replica_id"])
         
-        # Parse optional datetime strings
+        # Parse optional datetime strings - FIX per NoneType
         start_time = None
         end_time = None
-        if "start_time" in input_data:
+        
+        if "start_time" in input_data and input_data["start_time"] is not None:
             start_time = datetime.fromisoformat(input_data["start_time"].replace('Z', '+00:00'))
-        if "end_time" in input_data:
+        if "end_time" in input_data and input_data["end_time"] is not None:
             end_time = datetime.fromisoformat(input_data["end_time"].replace('Z', '+00:00'))
         
         return DataRetrievalQuery(
@@ -312,30 +313,156 @@ class DataRetrievalService(IService):
             aggregation_type=input_data.get("aggregation_type")
         )
     
+    async def _get_latest_from_redis(self, query: DataRetrievalQuery, twin_id: UUID) -> List[Dict[str, Any]]:
+        """Get latest data from Redis cache."""
+        try:
+            from src.storage.adapters.redis_cache import get_redis_cache
+            redis_cache = await get_redis_cache()
+            
+            data_points = []
+            
+            # Get device associations to know which devices to check
+            registry = self.virtualization_orchestrator.registry
+            for key, association in registry.device_associations.items():
+                if str(association.replica_id) == str(query.replica_id):
+                    device_id = association.device_id
+                    
+                    # Filter by device_ids if specified
+                    if query.device_ids and device_id not in query.device_ids:
+                        continue
+                    
+                    # Get from Redis
+                    cache_key = f"latest_device_data:{device_id}:{query.replica_id}"
+                    cached_data = await redis_cache.get(cache_key, namespace="device_data")
+                    
+                    if cached_data:
+                        # Convert to API format
+                        data_point = {
+                            "device_id": cached_data["device_id"],
+                            "timestamp": cached_data["timestamp"],
+                            "data": cached_data["data"],
+                            "data_type": cached_data["data_type"],
+                            "quality": float(cached_data.get("quality", 0.5)),
+                            "metadata": {
+                                "source": "redis_cache",
+                                "replica_id": str(query.replica_id),
+                                **cached_data.get("device_metadata", {})
+                            }
+                        }
+                        
+                        # Apply quality filter
+                        if data_point["quality"] >= query.min_quality:
+                            data_points.append(data_point)
+            
+            return data_points[:query.limit]
+            
+        except Exception as e:
+            logger.warning(f"Failed to get data from Redis: {e}")
+            return []
+
+    async def _get_latest_from_mongodb(self, query: DataRetrievalQuery, twin_id: UUID) -> List[Dict[str, Any]]:
+        """Get latest data from MongoDB."""
+        try:
+            from src.core.entities.device_data import DeviceDataEntity
+            from src.storage import get_twin_storage_adapter
+            
+            # Get MongoDB adapter for this twin
+            storage_adapter = get_twin_storage_adapter(DeviceDataEntity, twin_id)
+            
+            # Build filters
+            filters = {
+                "replica_id": str(query.replica_id)
+            }
+            
+            if query.device_ids:
+                filters["device_id"] = {"$in": query.device_ids}
+            
+            # Get all data and then find latest per device
+            all_data = await storage_adapter.query(filters, limit=1000)  # Get recent data
+            
+            # Group by device_id and get latest
+            device_latest = {}
+            for entity in all_data:
+                device_id = entity.device_id
+                if device_id not in device_latest or entity.timestamp > device_latest[device_id].timestamp:
+                    device_latest[device_id] = entity
+            
+            # Convert to API format
+            data_points = []
+            for entity in device_latest.values():
+                # Apply quality filter
+                quality_score = 1.0 if entity.quality == DataQuality.HIGH else 0.7 if entity.quality == DataQuality.MEDIUM else 0.4
+                
+                if quality_score >= query.min_quality:
+                    data_point = {
+                        "device_id": entity.device_id,
+                        "timestamp": entity.timestamp.isoformat(),
+                        "data": entity.data,
+                        "data_type": entity.data_type,
+                        "quality": quality_score,
+                        "metadata": {
+                            "source": "mongodb",
+                            "entity_id": str(entity.id),
+                            "processed": entity.processed,
+                            **entity.device_metadata
+                        } if query.include_metadata else {}
+                    }
+                    data_points.append(data_point)
+            
+            return data_points[:query.limit]
+            
+        except Exception as e:
+            logger.warning(f"Failed to get data from MongoDB: {e}")
+            return []
+    
+    
     async def _get_latest_data(self, query: DataRetrievalQuery) -> List[Dict[str, Any]]:
-        """Get latest data points from replica."""
+        """
+        Get latest data points from MongoDB/Redis - VERA IMPLEMENTAZIONE!
+        Non più mock data - dati reali dal database!
+        """
         if not self.virtualization_orchestrator:
             raise ServiceError("Virtualization orchestrator not available")
         
+        try:
+            # 🔥 STEP 1: Get twin ID from replica
+            registry = self.virtualization_orchestrator.registry
+            replica = await registry.get_digital_replica(query.replica_id)
+            twin_id = replica.parent_digital_twin_id
+            
+            # 🔥 STEP 2: Try Redis cache first (FAST!)
+            data_points = await self._get_latest_from_redis(query, twin_id)
+            if data_points:
+                logger.info(f"🚀 Retrieved {len(data_points)} data points from Redis cache")
+                return data_points
+            
+            # 🔥 STEP 3: Fallback to MongoDB (SLOWER but complete)
+            data_points = await self._get_latest_from_mongodb(query, twin_id)
+            logger.info(f"💾 Retrieved {len(data_points)} data points from MongoDB")
+            
+            return data_points
+            
+        except Exception as e:
+            logger.error(f"Failed to get latest data: {e}")
+            # Final fallback to association-based mock (backward compatibility)
+            return await self._get_latest_data_fallback(query)
+    
+    
+    async def _get_latest_data_fallback(self, query: DataRetrievalQuery) -> List[Dict[str, Any]]:
+        """Fallback to association-based data (backward compatibility)."""
+        # Questo è il vecchio metodo come backup
         registry = self.virtualization_orchestrator.registry
         data_points = []
         
-        # Access device associations directly from registry
         for key, association in registry.device_associations.items():
             if str(association.replica_id) == str(query.replica_id):
-                
-                # Filter by device_ids if specified
                 if query.device_ids and association.device_id not in query.device_ids:
                     continue
                 
-                # Get quality score
                 quality_score = association.get_average_quality_score()
-                
-                # Filter by quality
                 if quality_score < query.min_quality:
                     continue
                 
-                # Create synthetic data point from association data
                 data_point = {
                     "device_id": association.device_id,
                     "timestamp": association.last_data_timestamp.isoformat() if association.last_data_timestamp else None,
@@ -343,39 +470,86 @@ class DataRetrievalService(IService):
                     "data_type": "sensor_reading",
                     "quality": quality_score,
                     "metadata": {
+                        "source": "association_fallback",
                         "association_type": association.association_type,
-                        "data_count": association.data_count,
-                        "created_at": association.created_at.isoformat()
+                        "data_count": association.data_count
                     } if query.include_metadata else {}
                 }
-                
                 data_points.append(data_point)
         
-        # Apply limit
         return data_points[:query.limit]
     
+    
     async def _get_historical_data(self, query: DataRetrievalQuery) -> List[Dict[str, Any]]:
-        """Get historical data points within time range."""
+        """
+        Get historical data from MongoDB - VERA IMPLEMENTAZIONE!
+        """
         if not self.virtualization_orchestrator:
             raise ServiceError("Virtualization orchestrator not available")
         
-        registry = self.virtualization_orchestrator.registry
-        data_points = []
-        
-        for key, association in registry.device_associations.items():
-            if str(association.replica_id) == str(query.replica_id):
+        try:
+            # Get twin ID
+            registry = self.virtualization_orchestrator.registry
+            replica = await registry.get_digital_replica(query.replica_id)
+            twin_id = replica.parent_digital_twin_id
+            
+            from src.core.entities.device_data import DeviceDataEntity
+            from src.storage import get_twin_storage_adapter
+            
+            # Get MongoDB adapter
+            storage_adapter = get_twin_storage_adapter(DeviceDataEntity, twin_id)
+            
+            # Build time-based filters
+            filters = {
+                "replica_id": str(query.replica_id)
+            }
+            
+            if query.device_ids:
+                filters["device_id"] = {"$in": query.device_ids}
+            
+            # Add time range filters
+            if query.start_time or query.end_time:
+                time_filter = {}
+                if query.start_time:
+                    time_filter["$gte"] = query.start_time.isoformat()
+                if query.end_time:
+                    time_filter["$lte"] = query.end_time.isoformat()
+                filters["timestamp"] = time_filter
+            
+            # Query MongoDB
+            entities = await storage_adapter.query(filters, limit=query.limit)
+            
+            # Convert to API format
+            data_points = []
+            for entity in entities:
+                quality_score = 1.0 if entity.quality == DataQuality.HIGH else 0.7 if entity.quality == DataQuality.MEDIUM else 0.4
                 
-                if query.device_ids and association.device_id not in query.device_ids:
-                    continue
-                
-                # Generate historical data points (mock)
-                historical_points = self._generate_historical_data(
-                    association, query.start_time, query.end_time, query.limit
-                )
-                data_points.extend(historical_points)
-        
-        return sorted(data_points, key=lambda x: x["timestamp"], reverse=True)[:query.limit]
-    
+                if quality_score >= query.min_quality:
+                    data_point = {
+                        "device_id": entity.device_id,
+                        "timestamp": entity.timestamp.isoformat(),
+                        "data": entity.data,
+                        "data_type": entity.data_type,
+                        "quality": quality_score,
+                        "metadata": {
+                            "source": "mongodb_historical",
+                            "entity_id": str(entity.id),
+                            "processed": entity.processed,
+                            **entity.device_metadata
+                        } if query.include_metadata else {}
+                    }
+                    data_points.append(data_point)
+            
+            # Sort by timestamp descending
+            data_points.sort(key=lambda x: x["timestamp"], reverse=True)
+            
+            return data_points
+            
+        except Exception as e:
+            logger.error(f"Failed to get historical data from MongoDB: {e}")
+            # Final fallback
+            return []
+
     async def _get_aggregated_data(self, query: DataRetrievalQuery) -> Dict[str, Any]:
         """Get aggregated data summary."""
         if not self.virtualization_orchestrator:

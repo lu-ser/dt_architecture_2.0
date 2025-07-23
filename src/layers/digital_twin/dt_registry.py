@@ -179,6 +179,7 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         self.model_registry: Dict[UUID, TwinSnapshot] = {}  # Semplificato per ora
         self.twin_snapshots: Dict[UUID, List[TwinSnapshot]] = {}
         self._associations: Dict[str, DigitalTwinAssociation] = {}
+        self.load_associations_from_mongodb()
         
         # Lock per operazioni concorrenti
         self._association_lock = asyncio.Lock()
@@ -208,16 +209,39 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         async with self._performance_lock:
             self.twin_performance_metrics.total_twins += 1
     
+    
     async def add_association(self, association: DigitalTwinAssociation) -> None:
-        """Add an association between a Digital Twin and another entity."""
+        """Add an association between a Digital Twin and another entity - CON PERSISTENZA MONGODB!"""
         try:
+            # 1. Salva in memoria (per backward compatibility)
             association_key = f"{association.twin_id}:{association.associated_entity_id}:{association.association_type}"
             self._associations[association_key] = association
+            
+            # 2. 🔥 SALVA IN MONGODB PER PERSISTENZA!
+            try:
+                from src.core.entities.association import DigitalTwinAssociationEntity
+                from src.storage import get_global_storage_adapter
+                
+                # Create MongoDB entity
+                association_entity = DigitalTwinAssociationEntity.from_association(association)
+                
+                # Get MongoDB adapter
+                storage_adapter = get_global_storage_adapter(DigitalTwinAssociationEntity)
+                
+                # Save to MongoDB
+                await storage_adapter.save(association_entity)
+                logger.info(f"💾 Association saved to MongoDB: {association_key}")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to save association to MongoDB: {e}")
+                # Continue - at least we have it in memory
+            
             logger.info(f"Association added: {association_key}")
+            
         except Exception as e:
             logger.error(f"Failed to add association: {e}")
             raise
-    
+
     async def remove_association(
         self,
         twin_id: UUID,
@@ -277,6 +301,41 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
                 self.twin_hierarchies[parent_twin_id].discard(child_id)
         return children
     
+    async def load_associations_from_mongodb(self) -> None:
+        """Load all associations from MongoDB at startup."""
+        try:
+            from src.core.entities.association import DigitalTwinAssociationEntity
+            from src.storage import get_global_storage_adapter
+            
+            storage_adapter = get_global_storage_adapter(DigitalTwinAssociationEntity)
+            
+            # Load all associations from MongoDB
+            association_entities = await storage_adapter.query({}, limit=10000)
+            
+            loaded_count = 0
+            for entity in association_entities:
+                # Convert back to DigitalTwinAssociation and store in memory
+                association = DigitalTwinAssociation(
+                    twin_id=entity.twin_id,
+                    associated_entity_id=entity.associated_entity_id,
+                    association_type=entity.association_type,
+                    entity_type=entity.entity_type,
+                    created_at=entity._metadata.timestamp,
+                    metadata=entity.association_metadata
+                )
+                association.last_interaction = entity.last_interaction
+                association.interaction_count = entity.interaction_count
+                
+                # Store in memory
+                association_key = f"{association.twin_id}:{association.associated_entity_id}:{association.association_type}"
+                self._associations[association_key] = association
+                loaded_count += 1
+            
+            logger.info(f"🔄 Loaded {loaded_count} associations from MongoDB")
+            
+        except Exception as e:
+            logger.error(f"Failed to load associations from MongoDB: {e}")
+
     async def get_twin_hierarchy_tree(self, root_twin_id: UUID) -> Dict[str, Any]:
         """Get complete hierarchy tree for a twin."""
         try:

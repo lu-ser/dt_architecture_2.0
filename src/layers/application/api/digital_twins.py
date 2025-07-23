@@ -677,14 +677,56 @@ async def get_historical_data(
 ) -> Dict[str, Any]:
     """Get historical data from replicas within a time range."""
     try:
-        # Get all replicas for this digital twin
-        replicas = await gateway.virtualization_orchestrator.registry.find_replicas_by_digital_twin(twin_id)
+        # 🔍 DEBUG: Check registry state
+        dr_registry = gateway.virtualization_orchestrator.registry
+        logger.info(f"🔍 DEBUG: Looking for replicas for twin {twin_id}")
+        
+        # Check the mapping directly
+        replica_ids_in_mapping = dr_registry.digital_twin_replicas.get(twin_id, set())
+        logger.info(f"🔍 DEBUG: Replica IDs in mapping for twin {twin_id}: {replica_ids_in_mapping}")
+        
+        # Try to get each replica manually
+        found_replicas = []
+        failed_replica_ids = []
+        
+        for replica_id in replica_ids_in_mapping:
+            try:
+                replica = await dr_registry.get_digital_replica(replica_id)
+                found_replicas.append(replica)
+                logger.info(f"✅ DEBUG: Successfully got replica {replica_id}")
+            except Exception as e:
+                failed_replica_ids.append(replica_id)
+                logger.error(f"❌ DEBUG: Failed to get replica {replica_id}: {e}")
+        
+        logger.info(f"🔍 DEBUG: Manual check - Found {len(found_replicas)} replicas, Failed {len(failed_replica_ids)}")
+        
+        # Now call the official method
+        replicas = await dr_registry.find_replicas_by_digital_twin(twin_id)
+        logger.info(f"🔍 DEBUG: Official method found {len(replicas)} replicas")
+        
+        # Check mapping after official call
+        replica_ids_after = dr_registry.digital_twin_replicas.get(twin_id, set())
+        logger.info(f"🔍 DEBUG: Replica IDs in mapping AFTER official call: {replica_ids_after}")
         
         if not replicas:
+            # 🔍 DEBUG: More detailed info
+            all_replicas = await dr_registry.list()
+            logger.info(f"🔍 DEBUG: Total replicas in system: {len(all_replicas)}")
+            for replica in all_replicas[:3]:  # Show first 3
+                parent_id = getattr(replica, 'parent_digital_twin_id', 'N/A')
+                logger.info(f"🔍 DEBUG: Replica {replica.id} -> parent: {parent_id}")
+            
             return {
                 "twin_id": str(twin_id),
                 "data": [],
-                "message": "No replicas found for this Digital Twin"
+                "message": "No replicas found for this Digital Twin",
+                "debug_info": {
+                    "replica_ids_in_mapping": [str(rid) for rid in replica_ids_in_mapping],
+                    "found_replicas_manual": len(found_replicas),
+                    "failed_replica_ids": [str(rid) for rid in failed_replica_ids],
+                    "replica_ids_after_official_call": [str(rid) for rid in replica_ids_after],
+                    "mapping_was_cleaned": len(replica_ids_in_mapping) != len(replica_ids_after)
+                }
             }
         
         # Create data retrieval service

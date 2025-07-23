@@ -336,10 +336,15 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
             'service': 'services',
             'standardservice': 'services',
             'user': 'users',
-            'apikey': 'api_keys'
+            'apikey': 'api_keys',
+            # 🔥 NUOVO: Device data mapping
+            'devicedataentity': 'device_data',
+            'devicedata': 'device_data',
+            'digitaltwinassociationentity': 'twin_associations'
         }
         
         return collection_mapping.get(entity_name, f"{entity_name}s")
+
     
     def _get_connection_string(self) -> str:
         """Build MongoDB connection string."""
@@ -405,6 +410,27 @@ class MongoStorageAdapter(IStorageAdapter[T], Generic[T]):
                 await self._collection.create_index("username", unique=True)
                 await self._collection.create_index("email", unique=True)
                 await self._collection.create_index("tenant_id")
+            
+            # 🔥 DEVICE DATA INDEXES - PERFORMANCE CRITICO!
+            if 'device_data' in self._collection_name:
+                # Compound indexes for device data queries
+                await self._collection.create_index([
+                    ("replica_id", 1),
+                    ("device_id", 1),
+                    ("timestamp", -1)  # Descending for latest-first
+                ])
+                
+                await self._collection.create_index([
+                    ("device_id", 1),
+                    ("timestamp", -1)
+                ])
+                
+                await self._collection.create_index("timestamp")
+                await self._collection.create_index("replica_id")
+                await self._collection.create_index("quality")
+                await self._collection.create_index("processed")
+                
+                logger.info("📊 Device data indexes created for high performance queries")
             
             logger.debug(f"Indexes ensured for {self._collection_name}")
             

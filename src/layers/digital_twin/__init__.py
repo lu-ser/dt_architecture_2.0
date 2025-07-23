@@ -136,6 +136,7 @@ class DigitalTwinLayerOrchestrator:
             # Integrate with other layers
             await self._integrate_with_virtualization_layer()
             await self._integrate_with_service_layer()
+            await self.registry.load_associations_from_mongodb()
             
             if self.templates_integration:
                 await self._integrate_with_templates()
@@ -338,28 +339,40 @@ class DigitalTwinLayerOrchestrator:
             logger.warning(f'Failed to setup twin storage for {twin_id}: {e}')
 
     async def associate_replica_with_twin(
-        self, 
-        twin_id: UUID, 
-        replica_id: UUID, 
-        data_mapping: Optional[Dict[str, str]] = None
-    ) -> None:
-        """Associate replica with enhanced handling for wrapper objects."""
+    self, 
+    twin_id: UUID, 
+    replica_id: UUID, 
+    data_mapping: Optional[Dict[str, str]] = None
+) -> None:
+        """
+        Associate a Digital Replica with a Digital Twin.
+        
+        Completely rewritten to handle registry synchronization properly
+        without relying on twin wrapper methods.
+        """
         try:
-            # Try to get the twin (might be a wrapper)
-            twin = await self.registry.get_digital_twin(twin_id)
+            logger.info(f"Starting association: Twin {twin_id} <-> Replica {replica_id}")
             
-            # Check if twin has associate_replica method
-            if hasattr(twin, 'associate_replica') and callable(getattr(twin, 'associate_replica')):
-                try:
-                    await twin.associate_replica(replica_id)
-                    logger.info(f"Used twin.associate_replica() method")
-                except Exception as e:
-                    logger.warning(f"twin.associate_replica() failed: {e}")
-                    # Don't raise here, continue with fallback
-            else:
-                logger.info("Twin is wrapper object, using registry-based association")
-                
-            # Create association record in registry - USE EXISTING DigitalTwinAssociation
+            # 1. Verify both entities exist
+            # Verify Digital Twin exists
+            twin = await self.registry.get_digital_twin(twin_id)
+            if not twin:
+                raise DigitalTwinError(f"Digital Twin {twin_id} not found")
+            logger.info(f"✅ Digital Twin {twin_id} found")
+            
+            # Verify Digital Replica exists
+            if not self.virtualization_orchestrator:
+                raise DigitalTwinError("Virtualization orchestrator not available")
+            
+            replica_registry = self.virtualization_orchestrator.registry
+            replica = await replica_registry.get_digital_replica(replica_id)
+            if not replica:
+                raise DigitalTwinError(f"Digital Replica {replica_id} not found")
+            logger.info(f"✅ Digital Replica {replica_id} found")
+            
+            # 2. Create association record in DT registry
+            from src.layers.digital_twin.dt_registry import DigitalTwinAssociation
+            
             association = DigitalTwinAssociation(
                 twin_id=twin_id,
                 associated_entity_id=replica_id,
@@ -369,21 +382,43 @@ class DigitalTwinLayerOrchestrator:
             )
             
             await self.registry.add_association(association)
-            logger.info(f"Association record created in DT registry")
+            logger.info(f"✅ Association record created in DT registry")
             
-            # Update data flow tracking
+            # 3. SYNC CRITICO: Update digital_twin_replicas mapping nel DR registry
+            if twin_id not in replica_registry.digital_twin_replicas:
+                replica_registry.digital_twin_replicas[twin_id] = set()
+            replica_registry.digital_twin_replicas[twin_id].add(replica_id)
+            logger.info(f"✅ Synced mapping in DR registry: {twin_id} -> {replica_id}")
+            
+            # 4. Update data flow tracking
             if not hasattr(self, 'data_flow_subscriptions'):
                 self.data_flow_subscriptions = {}
             if twin_id not in self.data_flow_subscriptions:
                 self.data_flow_subscriptions[twin_id] = set()
             self.data_flow_subscriptions[twin_id].add(replica_id)
+            logger.info(f"✅ Data flow tracking updated")
             
-            logger.info(f'Associated replica {replica_id} with Digital Twin {twin_id}')
+            # 5. Invalidate cache if available
+            if hasattr(self, '_registry_cache') and self._registry_cache:
+                await self._registry_cache.invalidate_entity(twin_id, 'DigitalTwin')
+                logger.info(f"✅ Cache invalidated for twin {twin_id}")
+            
+            # 6. Configure data routing (se disponibile)
+            if hasattr(self, '_configure_data_routing'):
+                try:
+                    await self._configure_data_routing(twin_id, replica_id)
+                    logger.info(f"✅ Data routing configured")
+                except Exception as e:
+                    logger.warning(f"Data routing configuration failed: {e}")
+                    # Non critical, continue
+            
+            logger.info(f"🎉 Successfully associated replica {replica_id} with Digital Twin {twin_id}")
             
         except Exception as e:
-            logger.error(f'Failed to associate replica with twin: {e}')
-            raise DigitalTwinError(f'Replica association failed: {e}')
-        
+            logger.error(f"❌ Failed to associate replica {replica_id} with twin {twin_id}: {e}")
+            raise DigitalTwinError(f"Replica association failed: {e}")
+    
+
     async def bind_service_to_twin(
         self,
         twin_id: UUID,

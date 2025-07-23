@@ -11,7 +11,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body, status
 from pydantic import BaseModel, Field, validator
 
@@ -87,44 +87,54 @@ class ReplicaCreate(BaseModel):
 
 
 class DeviceData(BaseModel):
-    """Model for sending device data to a replica."""
-    device_id: str = Field(..., description="Device ID")
+    """Model for device data sent to a Digital Replica."""
+    device_id: str = Field(..., min_length=1, description="Unique device identifier")
     data: Dict[str, Any] = Field(..., description="Device data payload")
-    data_type: str = Field("sensor_reading", description="Type of data")
-    timestamp: Optional[datetime] = Field(None, description="Data timestamp (optional)")
-    quality_hint: Optional[str] = Field(None, description="Quality hint (high/medium/low)")
+    data_type: str = Field(..., description="Type of data being sent")
+    timestamp: Optional[datetime] = Field(None, description="Timestamp of the data (optional)")
+    quality_hint: Optional[str] = Field(None, description="Quality hint: high, medium, low")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata about the data")
+    
+    @validator('quality_hint')
+    @classmethod
+    def validate_quality_hint(cls, v):
+        if v is not None and v not in ["high", "medium", "low"]:
+            raise ValueError("quality_hint must be 'high', 'medium', or 'low'")
+        return v
     
     class Config:
         schema_extra = {
             "example": {
-                "device_id": "sensor-001",
+                "device_id": "smartwatch-hr-001",
                 "data": {
-                    "temperature": 22.5,
-                    "humidity": 65.2,
-                    "pressure": 1013.25
+                    "heart_rate": 72,
+                    "timestamp": "2025-07-23T10:30:00Z",
+                    "value": 72,
+                    "unit": "bpm",
+                    "dataType": "heart_rate"
                 },
-                "data_type": "environmental_reading",
-                "timestamp": "2024-01-01T10:30:00Z",
-                "quality_hint": "high"
+                "data_type": "heart_rate_reading",
+                "timestamp": "2025-07-23T10:30:00Z",
+                "quality_hint": "high",
+                "metadata": {
+                    "battery_level": 85,
+                    "signal_strength": "strong",
+                    "firmware_version": "1.2.3"
+                }
             }
         }
 
 
 class DeviceAssociation(BaseModel):
-    """Model for associating devices with a replica."""
+    """Model for associating a device with a replica."""
     device_id: str = Field(..., description="Device ID to associate")
     association_type: str = Field("managed", description="Type of association")
-    data_mapping: Optional[Dict[str, str]] = Field(None, description="Optional data field mapping")
     
     class Config:
         schema_extra = {
             "example": {
-                "device_id": "sensor-004",
-                "association_type": "monitored",
-                "data_mapping": {
-                    "temp": "temperature",
-                    "hum": "humidity"
-                }
+                "device_id": "smartwatch-hr-001",
+                "association_type": "managed"
             }
         }
 
@@ -535,48 +545,45 @@ async def disassociate_device(
 # DATA MANAGEMENT
 # =========================
 
-# ===============================================
-# FIX DEFINITIVO: src/layers/application/api/replicas.py
-# SOSTITUISCI il metodo send_device_data con questo VERO
-# ===============================================
-
 @router.post("/{replica_id}/data", summary="Send Device Data")
 async def send_device_data(
     replica_id: UUID = Path(..., description="Digital Replica ID"),
     device_data: DeviceData = Body(...),
     gateway: APIGateway = Depends(get_gateway)
 ) -> Dict[str, Any]:
-    """Send data from a device to a Digital Replica - VERSIONE VERA!"""
+    """
+    Send data from a device to a Digital Replica.
+    IMPLEMENTAZIONE DIRETTA CON MONGODB - BYPASS REPLICA WRAPPER!
+    """
     try:
-        # ✅ STEP 1: Ottieni la replica VERA dal registry
+        logger.info(f"🔥 Processing device data for replica {replica_id}, device {device_data.device_id}")
+        
+        # ✅ STEP 1: Get replica info and validate
         registry = gateway.virtualization_orchestrator.registry
         replica_wrapper = await registry.get_digital_replica(replica_id)
         
-        # ✅ STEP 2: Verifica che il device sia autorizzato
-        if device_data.device_id not in replica_wrapper.device_ids:
-            logger.warning(f"Device {device_data.device_id} not in replica {replica_id} device list")
-            # Aggiungi device se non c'è (auto-association)
-            devices = await registry.get_replica_devices(replica_id)
-            if device_data.device_id not in devices:
-                await registry.associate_device_with_replica(
-                    device_data.device_id, 
-                    replica_id,
-                    association_type="auto_detected"
-                )
-                logger.info(f"Auto-associated device {device_data.device_id} with replica {replica_id}")
+        # Get parent twin ID
+        if hasattr(replica_wrapper, 'parent_digital_twin_id'):
+            twin_id = replica_wrapper.parent_digital_twin_id
+        else:
+            # Try from metadata
+            metadata_dict = replica_wrapper.metadata.to_dict() if hasattr(replica_wrapper.metadata, 'to_dict') else replica_wrapper.metadata
+            twin_id = UUID(metadata_dict.get('custom', {}).get('parent_twin_id'))
         
-        # ✅ STEP 3: Converti i dati API in formato DeviceData interno
+        logger.info(f"✅ Found parent twin ID: {twin_id}")
+        
+        # ✅ STEP 2: Convert API data to internal format
         from src.core.interfaces.replica import DeviceData as InternalDeviceData, DataQuality
         from datetime import datetime, timezone
         
-        # Converti timestamp se presente
+        # Parse timestamp
         timestamp = device_data.timestamp
         if timestamp is None:
             timestamp = datetime.now(timezone.utc)
         elif isinstance(timestamp, str):
             timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
         
-        # Converti quality hint in DataQuality enum
+        # Convert quality
         quality_map = {
             "high": DataQuality.HIGH,
             "medium": DataQuality.MEDIUM, 
@@ -585,92 +592,105 @@ async def send_device_data(
         }
         quality = quality_map.get(device_data.quality_hint, DataQuality.UNKNOWN)
         
-        # Crea DeviceData interno
+        # Create internal device data - FIX metadata access
+        metadata = {}
+        if hasattr(device_data, 'metadata') and device_data.metadata is not None:
+            metadata = device_data.metadata
+        
         internal_device_data = InternalDeviceData(
             device_id=device_data.device_id,
             timestamp=timestamp,
             data=device_data.data,
             data_type=device_data.data_type,
             quality=quality,
-            metadata={}
+            metadata=metadata
         )
         
-        # ✅ STEP 4: Cerca la replica VERA nel factory (non il wrapper)
-        factory = gateway.virtualization_orchestrator.factory
-        
-        # Qui c'è il trucco - dobbiamo accedere alla replica reale
-        # Il registry ha solo wrapper, ma il factory dovrebbe avere l'oggetto vero
-        real_replica = None
-        
-        # Try diversi modi per ottenere la replica vera
+        # ✅ STEP 3: DIRECT MONGODB PERSISTENCE - BYPASS WRAPPER!
         try:
-            # Metodo 1: Se il factory tiene una cache delle repliche
-            if hasattr(factory, '_replica_cache') and replica_id in factory._replica_cache:
-                real_replica = factory._replica_cache[replica_id]
+            from src.core.entities.device_data import DeviceDataEntity
+            from src.storage import get_twin_storage_adapter
             
-            # Metodo 2: Se il lifecycle manager ha le repliche attive
-            elif hasattr(gateway.virtualization_orchestrator, 'lifecycle_manager'):
-                lifecycle_mgr = gateway.virtualization_orchestrator.lifecycle_manager
-                if hasattr(lifecycle_mgr, '_active_replicas') and replica_id in lifecycle_mgr._active_replicas:
-                    real_replica = lifecycle_mgr._active_replicas[replica_id]
+            # Get MongoDB adapter for this twin's database
+            storage_adapter = get_twin_storage_adapter(DeviceDataEntity, twin_id)
             
-            # Metodo 3: Ricrea la replica dal wrapper (ultimo resort)
-            if real_replica is None:
-                logger.warning(f"Cannot find real replica object for {replica_id}, using wrapper methods")
-                # Se non troviamo la replica vera, almeno registriamo i dati nel registry
-                await registry.record_device_data(
-                    device_id=device_data.device_id,
-                    replica_id=replica_id,
-                    data_quality=quality
-                )
-                
-                return {
-                    "replica_id": str(replica_id),
-                    "device_id": device_data.device_id,
-                    "data_received": True,
-                    "method": "registry_direct",
-                    "quality": quality.value,
-                    "processed_at": datetime.now(timezone.utc).isoformat(),
-                    "note": "Data recorded in registry, replica object not directly accessible"
+            # Create device data entity
+            device_data_entity = DeviceDataEntity.from_device_data(
+                internal_device_data, 
+                replica_id,
+                additional_metadata={
+                    "received_at": datetime.now(timezone.utc).isoformat(),
+                    "api_version": "1.0",
+                    "source": "api_direct"
                 }
-        
+            )
+            
+            # Save to MongoDB
+            await storage_adapter.save(device_data_entity)
+            logger.info(f"💾 Successfully saved device data to MongoDB - Twin DB: dt_twin_{str(twin_id).replace('-', '_')}")
+            
+            mongodb_success = True
+            saved_entity_id = device_data_entity.id
+            
         except Exception as e:
-            logger.error(f"Error finding real replica: {e}")
+            logger.error(f"❌ Failed to save to MongoDB: {e}")
+            mongodb_success = False
+            saved_entity_id = None
         
-        # ✅ STEP 5: Se abbiamo la replica vera, inviamo i dati
-        if real_replica:
-            logger.info(f"Found real replica object, sending data directly")
-            await real_replica.receive_device_data(internal_device_data)
+        # ✅ STEP 4: REDIS CACHE (optional, non-blocking)
+        redis_success = False
+        try:
+            from src.storage.adapters.redis_cache import get_redis_cache
+            redis_cache = await get_redis_cache()
             
-            # Ottieni statistiche aggiornate
-            stats = await real_replica.get_aggregation_statistics()
+            # Cache latest data per device
+            cache_key = f"latest_device_data:{device_data.device_id}:{replica_id}"
+            await redis_cache.set(
+                cache_key, 
+                device_data_entity.to_dict(), 
+                ttl=3600,  # 1 hour
+                namespace="device_data"
+            )
+            logger.info(f"🚀 Cached device data in Redis: {cache_key}")
+            redis_success = True
             
-            return {
-                "replica_id": str(replica_id),
-                "device_id": device_data.device_id,
-                "data_received": True,
-                "method": "direct_replica",
-                "quality": quality.value,
-                "processed_at": datetime.now(timezone.utc).isoformat(),
-                "aggregation_stats": stats,
-                "real_processing": True
-            }
+        except Exception as e:
+            logger.warning(f"Failed to cache in Redis (non-critical): {e}")
         
-        # ✅ FALLBACK: Almeno registra nel registry
-        await registry.record_device_data(
-            device_id=device_data.device_id,
-            replica_id=replica_id,
-            data_quality=quality
-        )
+        # ✅ STEP 5: Update registry associations (backward compatibility)
+        try:
+            await registry.record_device_data(
+                device_id=device_data.device_id,
+                replica_id=replica_id,
+                data_quality=quality
+            )
+            logger.info(f"📊 Updated registry associations")
+            registry_success = True
+            
+        except Exception as e:
+            logger.warning(f"Failed to update registry: {e}")
+            registry_success = False
         
+        # ✅ STEP 6: Success Response
         return {
             "replica_id": str(replica_id),
             "device_id": device_data.device_id,
+            "twin_id": str(twin_id),
             "data_received": True,
-            "method": "registry_fallback",
+            "method": "direct_mongodb_persistence",
             "quality": quality.value,
             "processed_at": datetime.now(timezone.utc).isoformat(),
-            "note": "Data registered, but direct replica access unavailable"
+            "persistence_status": {
+                "mongodb": mongodb_success,
+                "redis_cache": redis_success,
+                "registry_associations": registry_success
+            },
+            "database_info": {
+                "database": f"dt_twin_{str(twin_id).replace('-', '_')}",
+                "collection": "device_data",
+                "entity_id": str(saved_entity_id) if mongodb_success and saved_entity_id else None
+            },
+            "message": "✅ Device data processed with direct MongoDB persistence"
         }
         
     except EntityNotFoundError:
@@ -679,21 +699,12 @@ async def send_device_data(
             detail=f"Digital Replica {replica_id} not found"
         )
     except Exception as e:
-        logger.error(f"Failed to send data to replica {replica_id}: {e}")
+        logger.error(f"❌ Failed to process device data for replica {replica_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Data sending failed: {str(e)}"
+            detail=f"Device data processing failed: {str(e)}"
         )
 
-# ===============================================
-# FIX VERO: src/layers/application/api/replicas.py
-# Usa i metodi del REGISTRY che hanno accesso ai dati reali
-# ===============================================
-
-# ===============================================
-# FIX FINALE: src/layers/application/api/replicas.py
-# Bypassa completamente i wrapper e accede ai dati direttamente
-# ===============================================
 
 @router.get("/{replica_id}/performance", summary="Get Performance Metrics")
 async def get_performance_metrics(
@@ -1202,3 +1213,171 @@ async def bulk_scale_replicas(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Bulk scaling failed: {e}"
         )
+
+@router.get("/{replica_id}/mongodb-data", summary="Get Raw MongoDB Data for Replica")
+async def get_replica_mongodb_data(
+    replica_id: UUID = Path(..., description="Digital Replica ID"),
+    limit: int = Query(50, ge=1, le=500, description="Maximum number of records"),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
+    """
+    Get raw device data from MongoDB for this replica.
+    CAZZO DI ROUTE PER VEDERE I DATI VERI!
+    """
+    try:
+        # Get replica info to find parent twin
+        registry = gateway.virtualization_orchestrator.registry
+        replica = await registry.get_digital_replica(replica_id)
+        
+        if hasattr(replica, 'parent_digital_twin_id'):
+            twin_id = replica.parent_digital_twin_id
+        else:
+            metadata_dict = replica.metadata.to_dict() if hasattr(replica.metadata, 'to_dict') else replica.metadata
+            twin_id = UUID(metadata_dict.get('custom', {}).get('parent_twin_id'))
+        
+        logger.info(f"🔍 Looking for MongoDB data - Replica: {replica_id}, Twin: {twin_id}")
+        
+        # Get MongoDB adapter
+        from src.core.entities.device_data import DeviceDataEntity
+        from src.storage import get_twin_storage_adapter
+        
+        storage_adapter = get_twin_storage_adapter(DeviceDataEntity, twin_id)
+        
+        # Query filters for this replica
+        filters = {"replica_id": str(replica_id)}
+        
+        # Get raw data from MongoDB
+        entities = await storage_adapter.query(filters, limit=limit)
+        
+        logger.info(f"📊 Found {len(entities)} entities in MongoDB")
+        
+        # Convert to readable format
+        data_points = []
+        for entity in entities:
+            try:
+                data_points.append({
+                    "entity_id": str(entity.id),
+                    "device_id": entity.device_id,
+                    "timestamp": entity.timestamp.isoformat(),
+                    "data_type": entity.data_type,
+                    "quality": entity.quality.value,
+                    "data": entity.data,
+                    "device_metadata": entity.device_metadata,
+                    "processed": entity.processed,
+                    "created_at": entity.metadata.timestamp.isoformat()
+                })
+            except Exception as e:
+                logger.warning(f"Failed to convert entity: {e}")
+                continue
+        
+        # Sort by timestamp descending (newest first)
+        data_points.sort(key=lambda x: x["timestamp"], reverse=True)
+        
+        return {
+            "replica_id": str(replica_id),
+            "twin_id": str(twin_id),
+            "database": f"dt_twin_{str(twin_id).replace('-', '_')}",
+            "collection": "device_data",
+            "total_records": len(data_points),
+            "query_limit": limit,
+            "data": data_points,
+            "query_filters": filters,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "message": f"✅ Found {len(data_points)} real MongoDB records for replica {replica_id}"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to get MongoDB data for replica {replica_id}: {e}")
+        return {
+            "replica_id": str(replica_id),
+            "error": str(e),
+            "message": "Failed to retrieve MongoDB data",
+            "generated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+
+@router.get("/{replica_id}/raw-debug", summary="Complete Debug Info for Replica")
+async def get_replica_debug_info(
+    replica_id: UUID = Path(..., description="Digital Replica ID"),
+    gateway: APIGateway = Depends(get_gateway)
+) -> Dict[str, Any]:
+    """
+    Get EVERYTHING about this replica for debugging.
+    CAZZO DI DEBUG COMPLETO!
+    """
+    try:
+        registry = gateway.virtualization_orchestrator.registry
+        
+        # 1. Replica basic info
+        replica = await registry.get_digital_replica(replica_id)
+        replica_info = {
+            "exists": True,
+            "type": str(type(replica)),
+            "parent_twin_id": getattr(replica, 'parent_digital_twin_id', 'N/A'),
+            "device_ids": getattr(replica, 'device_ids', []),
+            "metadata": replica.metadata.to_dict() if hasattr(replica.metadata, 'to_dict') else str(replica.metadata)
+        }
+        
+        # 2. Device associations
+        device_associations = []
+        for key, association in registry.device_associations.items():
+            if str(association.replica_id) == str(replica_id):
+                device_associations.append({
+                    "device_id": association.device_id,
+                    "data_count": association.data_count,
+                    "last_data": association.last_data_timestamp.isoformat() if association.last_data_timestamp else None,
+                    "quality_score": association.get_average_quality_score(),
+                    "association_type": association.association_type
+                })
+        
+        # 3. Twin-Replica mapping
+        twin_replica_mappings = {}
+        for twin_id, replica_set in registry.digital_twin_replicas.items():
+            if replica_id in replica_set:
+                twin_replica_mappings[str(twin_id)] = list(str(r) for r in replica_set)
+        
+        # 4. MongoDB data count (if possible)
+        mongodb_info = {"error": "Could not check MongoDB"}
+        try:
+            if hasattr(replica, 'parent_digital_twin_id'):
+                twin_id = replica.parent_digital_twin_id
+                from src.core.entities.device_data import DeviceDataEntity
+                from src.storage import get_twin_storage_adapter
+                
+                storage_adapter = get_twin_storage_adapter(DeviceDataEntity, twin_id)
+                entities = await storage_adapter.query({"replica_id": str(replica_id)}, limit=5)
+                
+                mongodb_info = {
+                    "database": f"dt_twin_{str(twin_id).replace('-', '_')}",
+                    "collection": "device_data",
+                    "sample_count": len(entities),
+                    "has_data": len(entities) > 0
+                }
+        except Exception as e:
+            mongodb_info["error"] = str(e)
+        
+        return {
+            "replica_id": str(replica_id),
+            "replica_info": replica_info,
+            "device_associations": {
+                "count": len(device_associations),
+                "associations": device_associations
+            },
+            "twin_replica_mappings": twin_replica_mappings,
+            "mongodb_info": mongodb_info,
+            "registry_stats": {
+                "total_replicas": len(await registry.list()),
+                "total_device_associations": len(registry.device_associations),
+                "total_twin_mappings": len(registry.digital_twin_replicas)
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "debug_complete": True
+        }
+        
+    except Exception as e:
+        return {
+            "replica_id": str(replica_id),
+            "error": str(e),
+            "debug_failed": True,
+            "generated_at": datetime.now(timezone.utc).isoformat()
+        }

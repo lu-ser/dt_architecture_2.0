@@ -431,13 +431,14 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
         return list(self.replica_to_devices.get(replica_id, set()))
     
     async def record_device_data(
-        self,
-        device_id: str,
-        replica_id: UUID,
-        data_quality: DataQuality
-    ) -> None:
+    self,
+    device_id: str,
+    replica_id: UUID,
+    data_quality: DataQuality
+) -> None:
         """
         Record that data was received from a device by a replica.
+        Auto-creates device association if it doesn't exist.
         
         Args:
             device_id: ID of the device that sent data
@@ -445,15 +446,39 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
             data_quality: Quality of the received data
         """
         async with self._flow_lock:
-            # Update association statistics
+            # Check if association exists
             key = f"{device_id}:{replica_id}"
-            if key in self.device_associations:
-                self.device_associations[key].update_data_received(data_quality)
+            
+            # 🔥 AUTO-CREATE ASSOCIATION SE NON ESISTE
+            if key not in self.device_associations:
+                logger.info(f"Auto-creating device association: {device_id} -> {replica_id}")
+                
+                # Create new association
+                association = DeviceAssociation(
+                    device_id=device_id,
+                    replica_id=replica_id,
+                    association_type="managed"
+                )
+                
+                # Store association (without calling associate_device to avoid deadlock)
+                self.device_associations[key] = association
+                
+                # Update replica to devices mapping
+                if replica_id not in self.replica_to_devices:
+                    self.replica_to_devices[replica_id] = set()
+                self.replica_to_devices[replica_id].add(device_id)
+                
+                logger.info(f"✅ Auto-created association: {device_id} <-> {replica_id}")
+            
+            # Update association statistics
+            self.device_associations[key].update_data_received(data_quality)
             
             # Update flow metrics
             self.metrics.data_flow_metrics.record_data_point(
                 device_id, replica_id, data_quality
             )
+            
+            logger.debug(f"Recorded data: device={device_id}, replica={replica_id}, quality={data_quality.value}")
     
     async def record_aggregation(self, replica_id: UUID) -> None:
         """
