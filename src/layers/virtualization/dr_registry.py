@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 import logging
-
+from src.layers.digital_twin.association_manager import get_association_manager
 from src.core.registry.base import AbstractRegistry, RegistryMetrics
 from src.core.interfaces.base import IStorageAdapter
 from src.core.interfaces.replica import (
@@ -49,7 +49,7 @@ class DeviceAssociation:
         self.last_data_timestamp: Optional[datetime] = None
         self.data_count = 0
         self.quality_history: List[Tuple[datetime, DataQuality]] = []
-    
+        self._association_manager = None
     def update_data_received(self, quality: DataQuality) -> None:
         """Update statistics when data is received."""
         self.last_data_timestamp = datetime.now(timezone.utc)
@@ -227,31 +227,52 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
             cache_size=cache_size,
             cache_ttl=cache_ttl
         )
-        
         # Digital Replica specific storage
         self.device_associations: Dict[str, DeviceAssociation] = {}
         self.replica_to_devices: Dict[UUID, Set[str]] = {}
         self.digital_twin_replicas: Dict[UUID, Set[UUID]] = {}
-        
-        # Override metrics with DR-specific metrics
+        self._association_manager = None
         self.metrics = DigitalReplicaMetrics()
-        
         # Locks for thread safety
         self._association_lock = asyncio.Lock()
         self._flow_lock = asyncio.Lock()
+
+    async def _get_association_manager(self):
+        """Get association manager lazily"""
+        if self._association_manager is None:
+            self._association_manager = await get_association_manager()
+        return self._association_manager
+    
+    async def connect(self) -> None:
+        """Connect to storage and load associations."""
+        await super().connect()
+        await self.load_associations_from_storage()
+
+    async def load_associations_from_storage(self) -> None:
+        """Load associations from MongoDB into the Dict"""
+        try:
+            logger.info("🔄 Loading associations into digital_twin_replicas Dict...")
+            
+            association_manager = await self._get_association_manager()
+            persistent_associations = await association_manager.get_all_associations()
+            
+            # Clear and update the existing Dict
+            self.digital_twin_replicas.clear()
+            self.digital_twin_replicas.update(persistent_associations)
+            
+            total_associations = sum(len(replicas) for replicas in persistent_associations.values())
+            logger.info(f"✅ Loaded {total_associations} associations into memory Dict")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load associations from storage: {e}")
+            # Continue with empty dict
     
     async def register_digital_replica(
-        self,
-        replica: IDigitalReplica,
-        device_associations: Optional[List[DeviceAssociation]] = None
-    ) -> None:
-        """
-        Register a Digital Replica with optional device associations.
-        
-        Args:
-            replica: Digital Replica to register
-            device_associations: Optional device associations
-        """
+    self,
+    replica: IDigitalReplica,
+    device_associations: Optional[List[DeviceAssociation]] = None
+) -> None:
+        """Register replica and update both storage and memory."""
         # Register the replica using base functionality
         await self.register(replica)
         
@@ -269,12 +290,28 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
                 )
                 await self.associate_device(association)
         
-        # Track replica by parent Digital Twin
-        dt_id = replica.parent_digital_twin_id
-        if dt_id not in self.digital_twin_replicas:
-            self.digital_twin_replicas[dt_id] = set()
-        self.digital_twin_replicas[dt_id].add(replica.id)
-    
+        # NUOVO: Gestisci associazione twin-replica
+        if hasattr(replica, 'parent_digital_twin_id') and replica.parent_digital_twin_id:
+            dt_id = replica.parent_digital_twin_id
+            
+            # 1. Update memory Dict (for immediate compatibility)
+            if dt_id not in self.digital_twin_replicas:
+                self.digital_twin_replicas[dt_id] = set()
+            self.digital_twin_replicas[dt_id].add(replica.id)
+            
+            # 2. ALSO save to persistent storage
+            try:
+                association_manager = await self._get_association_manager()
+                await association_manager.create_association(
+                    twin_id=dt_id,
+                    replica_id=replica.id,
+                    association_type='data_source'
+                )
+                logger.info(f"✅ Saved association to BOTH memory and storage: {dt_id} -> {replica.id}")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    logger.error(f"Failed to save to persistent storage: {e}")
+
     async def get_digital_replica(self, replica_id: UUID) -> IDigitalReplica:
         """
         Get a Digital Replica by ID.
@@ -303,29 +340,115 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
         filters = {"replica_type": replica_type.value}
         return await self.list(filters=filters)
     
+    
     async def find_replicas_by_digital_twin(self, digital_twin_id: UUID) -> List[IDigitalReplica]:
         """
-        Find Digital Replicas associated with a specific Digital Twin.
-        
-        Args:
-            digital_twin_id: ID of the Digital Twin
-            
-        Returns:
-            List of associated Digital Replicas
+        Find replicas using memory Dict (for compatibility) but ensure it's synced
         """
-        replica_ids = self.digital_twin_replicas.get(digital_twin_id, set())
-        replicas = []
-        
-        for replica_id in replica_ids:
-            try:
-                replica = await self.get_digital_replica(replica_id)
-                replicas.append(replica)
-            except DigitalReplicaNotFoundError:
-                # Clean up stale reference
-                self.digital_twin_replicas[digital_twin_id].discard(replica_id)
-        
-        return replicas
-    
+        try:
+            # Use the normal Dict lookup (compatible with existing code)
+            replica_ids = self.digital_twin_replicas.get(digital_twin_id, set())
+            
+            # If empty, try to reload from storage once
+            if not replica_ids:
+                await self.load_associations_from_storage()
+                replica_ids = self.digital_twin_replicas.get(digital_twin_id, set())
+            
+            # Get the actual replica objects
+            replicas = []
+            stale_replica_ids = []
+            
+            for replica_id in replica_ids:
+                try:
+                    replica = await self.get_digital_replica(replica_id)
+                    replicas.append(replica)
+                except Exception as e:
+                    logger.warning(f"Replica {replica_id} found in associations but not in storage: {e}")
+                    stale_replica_ids.append(replica_id)
+            
+            # Clean up stale associations from memory Dict
+            if stale_replica_ids:
+                for stale_id in stale_replica_ids:
+                    self.digital_twin_replicas[digital_twin_id].discard(stale_id)
+                    if not self.digital_twin_replicas[digital_twin_id]:
+                        del self.digital_twin_replicas[digital_twin_id]
+            
+            logger.info(f"✅ Found {len(replicas)} replicas for twin {digital_twin_id} (using Dict)")
+            return replicas
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to find replicas for twin {digital_twin_id}: {e}")
+            return []
+
+
+    async def add_replica_twin_association(self, replica_id: UUID, twin_id: UUID, data_mapping: Optional[Dict] = None) -> None:
+        """SOLO STORAGE PERSISTENTE"""
+        try:
+            association_manager = await self._get_association_manager()
+            await association_manager.create_association(
+                twin_id=twin_id,
+                replica_id=replica_id,
+                association_type='data_source',
+                data_mapping=data_mapping
+            )
+            logger.info(f"✅ Added PERSISTENT replica-twin association: {replica_id} -> {twin_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to add replica-twin association: {e}")
+            raise
+
+
+    async def remove_replica_twin_association(self, replica_id: UUID, twin_id: UUID) -> bool:
+        """SOLO STORAGE PERSISTENTE"""
+        try:
+            association_manager = await self._get_association_manager()
+            success = await association_manager.remove_association(twin_id, replica_id)
+            
+            if success:
+                logger.info(f"✅ Removed PERSISTENT replica-twin association: {replica_id} -> {twin_id}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to remove replica-twin association: {e}")
+            return False
+
+    async def get_twin_for_replica(self, replica_id: UUID) -> Optional[UUID]:
+        """Get twin ID for replica from PERSISTENT storage"""
+        try:
+            association_manager = await self._get_association_manager()
+            return await association_manager.get_twin_for_replica(replica_id)
+        except Exception as e:
+            logger.error(f"Failed to get twin for replica {replica_id}: {e}")
+            return None
+
+    # AGGIORNARE tutti i metodi che usavano digital_twin_replicas
+    async def get_replica_count_by_twin(self, twin_id: UUID) -> int:
+        """Get replica count using persistent storage"""
+        try:
+            association_manager = await self._get_association_manager()
+            replica_ids = await association_manager.get_replicas_for_twin(twin_id)
+            return len(replica_ids)
+        except Exception as e:
+            logger.error(f"Failed to get replica count for twin {twin_id}: {e}")
+            return 0
+
+    async def get_all_twin_replica_mappings(self) -> Dict[str, List[str]]:
+        """Get all mappings as strings for API responses"""
+        try:
+            association_manager = await self._get_association_manager()
+            mappings = await association_manager.get_all_associations()
+            
+            # Convert to string format for APIs
+            string_mappings = {}
+            for twin_id, replica_ids in mappings.items():
+                string_mappings[str(twin_id)] = [str(rid) for rid in replica_ids]
+            
+            return string_mappings
+        except Exception as e:
+            logger.error(f"Failed to get all twin-replica mappings: {e}")
+            return {}
+
     async def find_replicas_by_device(self, device_id: str) -> List[IDigitalReplica]:
         """
         Find Digital Replicas managing a specific device.

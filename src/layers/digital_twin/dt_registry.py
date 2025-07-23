@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID
 import logging
+from src.layers.digital_twin.association_manager import get_association_manager
 
 from src.core.registry.dt_registry import DigitalTwinRegistry as BaseDigitalTwinRegistry
 from src.core.interfaces.base import IStorageAdapter
@@ -162,7 +163,7 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
     """
 
     def __init__(self, storage_adapter: IStorageAdapter[IDigitalTwin], 
-                 cache_enabled: bool = True, cache_size: int = 1000, cache_ttl: int = 300):
+             cache_enabled: bool = True, cache_size: int = 1000, cache_ttl: int = 300):
         # Inizializza il registry base
         super().__init__(
             entity_type=IDigitalTwin, 
@@ -176,17 +177,37 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         self.twin_associations: Dict[str, DigitalTwinRelationship] = {}
         self.twin_hierarchies: Dict[UUID, Set[UUID]] = {}
         self.twin_performance_metrics = DigitalTwinPerformanceMetrics()
-        self.model_registry: Dict[UUID, TwinSnapshot] = {}  # Semplificato per ora
+        self.model_registry: Dict[UUID, TwinSnapshot] = {}
         self.twin_snapshots: Dict[UUID, List[TwinSnapshot]] = {}
-        self._associations: Dict[str, DigitalTwinAssociation] = {}
-        self.load_associations_from_mongodb()
-        
+        self._associations: Dict[str, DigitalTwinAssociation] = {}   
         # Lock per operazioni concorrenti
         self._association_lock = asyncio.Lock()
         self._performance_lock = asyncio.Lock()
         self._hierarchy_lock = asyncio.Lock()
-    
-    
+        
+        # Flag per tracking inizializzazione
+        self._associations_loaded = False
+        
+    async def initialize_associations(self) -> None:
+        """Initialize associations after registry is connected."""
+        if self._associations_loaded:
+            return
+        
+        try:
+            logger.info("🔄 Loading associations from MongoDB...")
+            await self.load_associations_from_mongodb()
+            self._associations_loaded = True
+            logger.info("✅ Associations loaded successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to load associations: {e}")
+
+    async def connect(self) -> None:
+        """Connect to storage and load associations."""
+        await super().connect()  # Connect base registry
+        
+        # Load associations after connection
+        await self.initialize_associations()
+
     async def register_digital_twin(self, twin: IDigitalTwin, 
                                    initial_relationships: Optional[List[DigitalTwinRelationship]] = None) -> None:
         """Registra un Digital Twin con eventuali relazioni iniziali"""
@@ -211,37 +232,84 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
     
     
     async def add_association(self, association: DigitalTwinAssociation) -> None:
-        """Add an association between a Digital Twin and another entity - CON PERSISTENZA MONGODB!"""
+        """Add an association between a Digital Twin and another entity - CON PERSISTENZA!"""
         try:
             # 1. Salva in memoria (per backward compatibility)
             association_key = f"{association.twin_id}:{association.associated_entity_id}:{association.association_type}"
             self._associations[association_key] = association
             
-            # 2. 🔥 SALVA IN MONGODB PER PERSISTENZA!
+            # 2. NUOVO: Salva in storage persistente se è un'associazione replica
+            if not self._association_manager:
+                self._association_manager = await get_association_manager()
+            
+            if association.association_type == 'data_source' or 'replica' in str(association.associated_entity_id).lower():
+                try:
+                    await self._association_manager.create_association(
+                        twin_id=association.twin_id,
+                        replica_id=association.associated_entity_id,
+                        association_type=association.association_type,
+                        data_mapping=association.metadata if hasattr(association, 'metadata') else {}
+                    )
+                    logger.info(f"✅ Created persistent association: {association.twin_id} -> {association.associated_entity_id}")
+                except Exception as e:
+                    if "already exists" not in str(e):
+                        logger.error(f"❌ Failed to create persistent association: {e}")
+            
+            # 3. Salva in MongoDB collection dedicata
             try:
-                from src.core.entities.association import DigitalTwinAssociationEntity
-                from src.storage import get_global_storage_adapter
+                association_data = {
+                    'twin_id': str(association.twin_id),
+                    'associated_entity_id': str(association.associated_entity_id),
+                    'association_type': association.association_type,
+                    'entity_type': getattr(association, 'entity_type', 'unknown'),
+                    'metadata': getattr(association, 'metadata', {}),
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'active'
+                }
                 
-                # Create MongoDB entity
-                association_entity = DigitalTwinAssociationEntity.from_association(association)
+                # Usa storage adapter per salvare
+                from src.storage.adapters.mongodb_adapter import MongoStorageAdapter
+                from src.layers.digital_twin.association_manager import TwinReplicaAssociation
                 
-                # Get MongoDB adapter
-                storage_adapter = get_global_storage_adapter(DigitalTwinAssociationEntity)
+                if not hasattr(self, '_association_storage'):
+                    self._association_storage = MongoStorageAdapter(TwinReplicaAssociation, twin_id=None)
+                    await self._association_storage.connect()
                 
-                # Save to MongoDB
-                await storage_adapter.save(association_entity)
-                logger.info(f"💾 Association saved to MongoDB: {association_key}")
+                # Crea entity per storage
+                from uuid import uuid4
+                from src.core.interfaces.base import BaseMetadata
+                
+                association_entity = TwinReplicaAssociation(
+                    entity_id=uuid4(),
+                    metadata=BaseMetadata(
+                        entity_id=uuid4(),
+                        timestamp=datetime.now(timezone.utc),
+                        version='1.0',
+                        created_by=uuid4()
+                    ),
+                    twin_id=association.twin_id,
+                    replica_id=association.associated_entity_id,
+                    association_type=association.association_type,
+                    data_mapping=association_data['metadata']
+                )
+                
+                await self._association_storage.save(association_entity)
+                logger.info(f"✅ Saved association to MongoDB: {association_key}")
                 
             except Exception as e:
-                logger.error(f"❌ Failed to save association to MongoDB: {e}")
-                # Continue - at least we have it in memory
-            
-            logger.info(f"Association added: {association_key}")
+                logger.warning(f"Failed to save association to MongoDB: {e}")
             
         except Exception as e:
             logger.error(f"Failed to add association: {e}")
             raise
 
+    async def get_twin_replicas(self, twin_id: UUID) -> Set[UUID]:
+        """Ottieni repliche associate al twin (PERSISTENTE)"""
+        if not self._association_manager:
+            self._association_manager = await get_association_manager()
+        
+        return await self._association_manager.get_replicas_for_twin(twin_id)
+    
     async def remove_association(
         self,
         twin_id: UUID,

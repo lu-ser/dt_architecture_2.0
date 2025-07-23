@@ -906,40 +906,97 @@ async def debug_registry_data(
     try:
         registry = gateway.virtualization_orchestrator.registry
         
-        # Tutte le info di debug
-        debug_data = {
-            "replica_id": str(replica_id),
-            "registry_type": str(type(registry)),
-            "total_associations": len(registry.device_associations),
-            "total_replica_devices": len(registry.replica_to_devices),
-            "flow_metrics": registry.metrics.data_flow_metrics.to_dict(),
-            "all_association_keys": list(registry.device_associations.keys()),
-            "all_replica_keys": [str(k) for k in registry.replica_to_devices.keys()],
-            "replica_exists_in_devices": replica_id in registry.replica_to_devices,
-            "matching_associations": [],
-            "replica_devices": list(registry.replica_to_devices.get(replica_id, set())),
-            "generated_at": datetime.utcnow().isoformat()
+        # 1. Replica basic info
+        replica = await registry.get_digital_replica(replica_id)
+        replica_info = {
+            "exists": True,
+            "type": str(type(replica)),
+            "parent_twin_id": getattr(replica, 'parent_digital_twin_id', 'N/A'),
+            "device_ids": getattr(replica, 'device_ids', []),
+            "metadata": replica.metadata.to_dict() if hasattr(replica.metadata, 'to_dict') else str(replica.metadata)
         }
         
-        # Trova associations che matchano
+        # 2. Device associations (questi rimangono)
+        device_associations = []
         for key, association in registry.device_associations.items():
             if str(association.replica_id) == str(replica_id):
-                debug_data["matching_associations"].append({
-                    "key": key,
+                device_associations.append({
                     "device_id": association.device_id,
                     "data_count": association.data_count,
-                    "last_data": association.last_data_timestamp.isoformat() if association.last_data_timestamp else None
+                    "last_data": association.last_data_timestamp.isoformat() if association.last_data_timestamp else None,
+                    "quality_score": association.get_average_quality_score(),
+                    "association_type": association.association_type
                 })
         
-        return debug_data
+        # 3. NUOVO: Twin-Replica mapping da storage persistente
+        twin_replica_mappings = {}
+        try:
+            twin_id = await registry.get_twin_for_replica(replica_id)
+            if twin_id:
+                association_manager = await get_association_manager()
+                all_mappings = await association_manager.get_all_associations()
+                for t_id, r_ids in all_mappings.items():
+                    if replica_id in r_ids:
+                        twin_replica_mappings[str(t_id)] = [str(r) for r in r_ids]
+        except Exception as e:
+            twin_replica_mappings = {"error": str(e)}
+        
+        # 4. MongoDB info
+        mongodb_info = {"error": "Could not check MongoDB"}
+        try:
+            if hasattr(replica, 'parent_digital_twin_id'):
+                twin_id = replica.parent_digital_twin_id
+                from src.core.entities.device_data import DeviceDataEntity
+                from src.storage import get_twin_storage_adapter
+                
+                storage_adapter = get_twin_storage_adapter(DeviceDataEntity, twin_id)
+                entities = await storage_adapter.query({"replica_id": str(replica_id)}, limit=5)
+                
+                mongodb_info = {
+                    "database": f"dt_twin_{str(twin_id).replace('-', '_')}",
+                    "collection": "device_data",
+                    "sample_count": len(entities),
+                    "has_data": len(entities) > 0
+                }
+        except Exception as e:
+            mongodb_info["error"] = str(e)
+        
+        # 5. NUOVO: Registry stats da storage persistente
+        try:
+            all_mappings = await registry.get_all_twin_replica_mappings()
+            total_twin_mappings = len(all_mappings)
+            total_associations = sum(len(replicas) for replicas in all_mappings.values())
+        except Exception as e:
+            total_twin_mappings = 0
+            total_associations = 0
+        
+        return {
+            "replica_id": str(replica_id),
+            "replica_info": replica_info,
+            "device_associations": {
+                "count": len(device_associations),
+                "associations": device_associations
+            },
+            "twin_replica_mappings": twin_replica_mappings,
+            "mongodb_info": mongodb_info,
+            "registry_stats": {
+                "total_replicas": len(await registry.list()),
+                "total_device_associations": len(registry.device_associations),
+                "total_twin_mappings": total_twin_mappings,
+                "total_associations": total_associations,
+                "using_persistent_storage": True  # ← IMPORTANTE!
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "debug_complete": True
+        }
         
     except Exception as e:
         return {
             "replica_id": str(replica_id),
-            "error": f"Debug failed: {str(e)}",
-            "generated_at": datetime.utcnow().isoformat()
+            "error": str(e),
+            "debug_failed": True,
+            "generated_at": datetime.now(timezone.utc).isoformat()
         }
-
 @router.post("/{replica_id}/aggregation/trigger", summary="Force Data Aggregation")
 async def trigger_aggregation(
     replica_id: UUID = Path(..., description="Digital Replica ID"),

@@ -682,7 +682,13 @@ async def get_historical_data(
         logger.info(f"🔍 DEBUG: Looking for replicas for twin {twin_id}")
         
         # Check the mapping directly
-        replica_ids_in_mapping = dr_registry.digital_twin_replicas.get(twin_id, set())
+        replica_ids_in_mapping = set()
+        try:
+            from src.layers.digital_twin.association_manager import get_association_manager
+            association_manager = await get_association_manager()
+            replica_ids_in_mapping = await association_manager.get_replicas_for_twin(twin_id)
+        except Exception as e:
+            logger.error(f"Failed to get replicas from persistent storage: {e}")
         logger.info(f"🔍 DEBUG: Replica IDs in mapping for twin {twin_id}: {replica_ids_in_mapping}")
         
         # Try to get each replica manually

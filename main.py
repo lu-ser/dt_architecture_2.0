@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from typing import Optional
 import uvicorn
+from src.layers.digital_twin.association_manager import get_association_manager
 
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -148,6 +149,7 @@ class DigitalTwinPlatform:
             
             # 5. Initialize API Gateway
             await self._initialize_api_gateway()
+            await self._initialize_association_system()
             
             logger.info("Digital Twin Platform initialized successfully")
             
@@ -383,6 +385,115 @@ class DigitalTwinPlatform:
         except Exception as e:
             logger.error(f"Failed to initialize API Gateway: {e}")
             raise
+    
+    
+    async def _initialize_association_system(self) -> None:
+        """Initialize persistent association system for twin-replica mapping."""
+        try:
+            logger.info("Initializing persistent association system...")
+            
+            # Initialize Association Manager
+            association_manager = await get_association_manager()
+            logger.info("✅ Association Manager initialized")
+            
+            # Get registries from orchestrators
+            if hasattr(self, 'digital_twin_orchestrator') and self.digital_twin_orchestrator:
+                dt_registry = self.digital_twin_orchestrator.registry
+                if hasattr(dt_registry, 'initialize_associations'):
+                    await dt_registry.initialize_associations()
+                    logger.info("✅ DT Registry associations initialized")
+            else:
+                logger.warning("Digital Twin orchestrator not available for association sync")
+                return
+                
+            if hasattr(self, 'virtualization_orchestrator') and self.virtualization_orchestrator:
+                dr_registry = self.virtualization_orchestrator.registry
+            else:
+                logger.warning("Virtualization orchestrator not available for association sync")
+                return
+            
+            # Sync registries with persistent storage
+            await association_manager.sync_with_registries(dt_registry, dr_registry)
+            
+            # Check if we need to restore associations from replica metadata
+            stats = await association_manager.get_statistics()
+            if stats['total_associations'] == 0:
+                logger.info("🔧 No associations found, attempting restore from replica metadata...")
+                await self._restore_associations_from_metadata(association_manager, dr_registry)
+            else:
+                logger.info(f"✅ Found {stats['total_associations']} existing associations")
+            
+            # Cleanup orphaned associations
+            cleaned = await association_manager.cleanup_orphaned_associations(dt_registry, dr_registry)
+            if cleaned > 0:
+                logger.info(f"🧹 Cleaned {cleaned} orphaned associations")
+            
+            # Final sync after cleanup
+            await association_manager.sync_with_registries(dt_registry, dr_registry)
+            
+            logger.info("✅ Persistent association system initialized")
+            # Final verification
+            final_stats = await association_manager.get_statistics()
+            dr_memory_count = len(dr_registry.digital_twin_replicas)
+            
+            logger.info(f"✅ Association system initialized:")
+            logger.info(f"   📊 Persistent: {final_stats['total_associations']} associations")
+            logger.info(f"   💾 Memory: {dr_memory_count} mappings")
+            
+            if final_stats['total_associations'] != dr_memory_count:
+                logger.warning(f"⚠️ Mismatch detected: persistent={final_stats['total_associations']}, memory={dr_memory_count}")
+                logger.info("🔧 This will be auto-corrected by the orchestrator")  
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize association system: {e}")
+            # Non-critical error - continue without persistent associations
+            logger.warning("Continuing without persistent association system")
+
+    async def _restore_associations_from_metadata(self, association_manager, dr_registry) -> None:
+        """Restore associations from replica metadata (one-time migration)."""
+        try:
+            logger.info("🔄 Attempting to restore associations from replica metadata...")
+            
+            # Get all replicas
+            replicas = await dr_registry.list()
+            restored_count = 0
+            
+            for replica in replicas:
+                try:
+                    # Try to find parent twin ID from replica
+                    twin_id = None
+                    
+                    if hasattr(replica, 'parent_digital_twin_id'):
+                        twin_id = replica.parent_digital_twin_id
+                    elif hasattr(replica, 'metadata') and replica.metadata:
+                        try:
+                            metadata_dict = replica.metadata.to_dict() if hasattr(replica.metadata, 'to_dict') else replica.metadata
+                            custom_data = metadata_dict.get('custom', {}) if isinstance(metadata_dict, dict) else {}
+                            parent_twin_str = custom_data.get('parent_twin_id')
+                            if parent_twin_str:
+                                from uuid import UUID
+                                twin_id = UUID(parent_twin_str)
+                        except Exception as e:
+                            logger.debug(f"Failed to parse metadata for replica {replica.id}: {e}")
+                    
+                    if twin_id:
+                        # Create persistent association
+                        await association_manager.create_association(
+                            twin_id=twin_id,
+                            replica_id=replica.id,
+                            association_type='data_source'
+                        )
+                        restored_count += 1
+                        logger.info(f"✅ Restored association: {replica.id} -> {twin_id}")
+                    else:
+                        logger.debug(f"No parent twin found for replica {replica.id}")
+                
+                except Exception as e:
+                    logger.warning(f"Failed to restore association for replica {replica.id}: {e}")
+            
+            logger.info(f"✅ Restored {restored_count} associations from replica metadata")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to restore associations from metadata: {e}")
     
     async def _start_layer_orchestrators(self) -> None:
         """Start all layer orchestrators."""
