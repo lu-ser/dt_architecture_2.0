@@ -95,7 +95,10 @@ class DigitalTwinConfiguration:
             "twin_type": self.twin_type.value,
             "name": self.name,
             "description": self.description,
-            "capabilities": [cap.value for cap in self.capabilities],
+            "capabilities": [
+                        cap.value if hasattr(cap, 'value') else cap 
+                    for cap in self.capabilities
+                ],
             "model_configurations": {
                 model_type.value: config 
                 for model_type, config in self.model_configurations.items()

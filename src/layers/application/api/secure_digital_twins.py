@@ -49,16 +49,39 @@ class SecureDigitalTwinCreate(BaseModel):
             valid_types = [t.value for t in DigitalTwinType]
             raise ValueError(f'Invalid twin_type. Must be one of: {valid_types}')
 
-    @validator('capabilities')
+    @validator('capabilities', pre=True, always=True)
     @classmethod
     def validate_capabilities(cls, v):
+        """Validate capabilities or assign defaults if not provided."""
+        # Se capabilities non fornite, assegna default
+        if v is None or v == []:
+            return ["monitoring"]  # Default capability
+        
+        # Se fornite, prova validazione con registry (se disponibile)
         try:
+            from src.core.capabilities.capability_registry import get_capability_registry
+            registry = get_capability_registry()
+            
+            invalid_capabilities = []
             for cap in v:
-                TwinCapability(cap)
+                if not registry.has_capability(cap):
+                    invalid_capabilities.append(cap)
+            
+            if invalid_capabilities:
+                available = [cap.full_name for cap in registry.list_capabilities()]
+                raise ValueError(f"Invalid capabilities: {invalid_capabilities}. Available: {available}")
+            
             return v
-        except ValueError as e:
-            valid_caps = [c.value for c in TwinCapability]
-            raise ValueError(f'Invalid capability. Must be one of: {valid_caps}')
+            
+        except ImportError:
+            # Registry non disponibile, usa validazione legacy
+            try:
+                for cap in v:
+                    TwinCapability(cap)
+                return v
+            except ValueError as e:
+                valid_caps = [c.value for c in TwinCapability]
+                raise ValueError(f"Invalid capability. Must be one of: {valid_caps}")
     
     @validator('authorized_users')
     @classmethod

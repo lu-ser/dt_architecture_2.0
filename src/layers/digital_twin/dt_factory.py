@@ -599,7 +599,10 @@ class StandardDigitalTwin(IDigitalTwin):
             'description': self._configuration.description,
             'current_state': self._current_state.value,
             'status': self._status.value,
-            'capabilities': [cap.value for cap in self.capabilities],
+            'capabilities': [
+                cap.value if hasattr(cap, 'value') else cap 
+                for cap in self.capabilities
+            ],
             'configuration': self._configuration.to_dict(),
             'metadata': self._metadata.to_dict(),
             'integrated_models': [model.to_dict() for model in self._integrated_models.values()],
@@ -823,8 +826,11 @@ class DigitalTwinFactory(IDigitalTwinFactory):
                          security_enabled: bool = False) -> IDigitalTwin:
         """Create a new Digital Twin instance."""
         try:
-            if not self.validate_twin_config(twin_type, config):
-                raise FactoryConfigurationError('Invalid Digital Twin configuration')
+            logger.info(f"🔍 FACTORY RECEIVED CONFIG: {config}")  # ✅ DEBUG
+            if not self.validate_config(config):
+                logger.error(f"❌ FACTORY CONFIG VALIDATION FAILED: {config}")  # ✅ DEBUG
+                raise FactoryConfigurationError("Invalid Digital Twin configuration")
+            logger.info("✅ FACTORY CONFIG VALIDATION PASSED")
 
             if metadata is None:
                 creator_id = owner_id or uuid4()
@@ -1285,7 +1291,7 @@ class DigitalTwinFactory(IDigitalTwinFactory):
                 twin_type=twin_type,
                 name=config["name"],
                 description=config.get("description", ""),
-                capabilities=set(TwinCapability(cap) for cap in config.get("capabilities", [])),
+                capabilities=self._convert_capabilities_to_enum_set(config.get("capabilities", ["monitoring"])),
                 model_configurations=config.get("model_configurations", {}),
                 data_sources=config.get("data_sources", []),
                 update_frequency=config.get("update_frequency", 60),
@@ -1315,6 +1321,43 @@ class DigitalTwinFactory(IDigitalTwinFactory):
             logger.error(f"Failed to create Digital Twin: {e}")
             raise EntityCreationError(f"Digital Twin creation failed: {e}")
     
+    def _convert_capabilities_to_enum_set(self, capabilities: List[str]) -> Set:
+        """Convert capability strings to enum set, handling both new and old system."""
+        if not capabilities:
+            capabilities = ["monitoring"]
+        
+        capability_set = set()
+        
+        try:
+            # Try new registry system first
+            from src.core.capabilities.capability_registry import get_capability_registry
+            registry = get_capability_registry()
+            
+            for cap in capabilities:
+                if registry.has_capability(cap):
+                    # For now, still use enum internally but validate with registry
+                    try:
+                        capability_set.add(TwinCapability(cap))
+                    except ValueError:
+                        # If not in enum, skip for now (future: store as string)
+                        logger.warning(f"Capability '{cap}' valid in registry but not in enum, skipping")
+                else:
+                    logger.warning(f"Unknown capability '{cap}', skipping")
+                    
+        except ImportError:
+            # Fallback to enum validation
+            for cap in capabilities:
+                try:
+                    capability_set.add(TwinCapability(cap))
+                except ValueError:
+                    logger.warning(f"Invalid capability '{cap}', skipping")
+        
+        # Ensure at least monitoring is present
+        if not capability_set:
+            capability_set.add(TwinCapability.MONITORING)
+        
+        return capability_set
+    
     async def create_from_template_v2(
         self, 
         template_id: str, 
@@ -1324,26 +1367,70 @@ class DigitalTwinFactory(IDigitalTwinFactory):
         """Create a Digital Twin from a predefined template."""
         return await self.create_from_template(template_id, config_overrides, metadata)
     
-    def validate_config(self, config: Dict[str, Any]) -> bool:
+    def validate_config(self, config) -> bool:  # ✅ Rimuovi type hint per ora
         """Validate the configuration before entity creation."""
-        required_fields = ["twin_type", "name", "capabilities"]
+        
+        # ✅ HANDLE BOTH Dict and DigitalTwinConfiguration object
+        if hasattr(config, 'to_dict'):
+            # It's a DigitalTwinConfiguration object
+            logger.info("🔄 Converting DigitalTwinConfiguration object to dict")
+            config_dict = config.to_dict()
+        elif isinstance(config, dict):
+            # It's already a dictionary
+            logger.info("✅ Config is already a dictionary")
+            config_dict = config
+        else:
+            logger.error(f"❌ Unknown config type: {type(config)}")
+            return False
+        
+        logger.info(f"🔍 VALIDATING CONFIG DICT: {config_dict}")
+        
+        required_fields = ["twin_type", "name"]
         
         for field in required_fields:
-            if field not in config:
+            if field not in config_dict:
+                logger.error(f"❌ VALIDATION FAILED: Missing required field '{field}'")
                 return False
         
         try:
-            DigitalTwinType(config["twin_type"])
+            twin_type = DigitalTwinType(config_dict["twin_type"])
+            logger.info(f"✅ Twin type valid: {twin_type}")
             
             # Validate capabilities
-            for cap in config["capabilities"]:
-                TwinCapability(cap)
+            capabilities = config_dict.get("capabilities", ["monitoring"])
+            if capabilities is None:
+                capabilities = ["monitoring"]
             
+            logger.info(f"🔍 Validating capabilities: {capabilities}")
+            
+            # Use new registry validation
+            try:
+                from src.core.capabilities.capability_registry import get_capability_registry
+                registry = get_capability_registry()
+                
+                for cap in capabilities:
+                    if not registry.has_capability(cap):
+                        logger.warning(f"⚠️ Unknown capability '{cap}', ignoring")
+                    else:
+                        logger.info(f"✅ Capability '{cap}' is valid")
+                        
+            except ImportError as e:
+                logger.warning(f"⚠️ Registry not available, using fallback: {e}")
+                for cap in capabilities:
+                    try:
+                        TwinCapability(cap)
+                        logger.info(f"✅ Capability '{cap}' valid (legacy)")
+                    except ValueError:
+                        logger.warning(f"⚠️ Invalid capability '{cap}' using legacy validation")
+            
+            logger.info("✅ CONFIG VALIDATION PASSED")
             return True
             
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.error(f"❌ VALIDATION FAILED: {e}")
             return False
-    
+
+
     def get_supported_types(self) -> List[str]:
         """Get the list of entity types this factory can create."""
         return [dt.value for dt in self._supported_types]

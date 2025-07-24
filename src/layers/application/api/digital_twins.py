@@ -41,7 +41,7 @@ class DigitalTwinCreate(BaseModel):
     twin_type: str = Field(..., description="Type of Digital Twin")
     name: str = Field(..., min_length=1, max_length=255, description="Human-readable name")
     description: str = Field("", max_length=1000, description="Description of the twin")
-    capabilities: List[str] = Field(..., min_items=1, description="List of capabilities")
+    capabilities: Optional[List[str]] = Field(None, description="List of capabilities (optional)")
     template_id: Optional[str] = Field(None, description="Template ID for creation")
     customization: Optional[Dict[str, Any]] = Field(None, description="Template customization")
     parent_twin_id: Optional[UUID] = Field(None, description="Parent twin for hierarchy")

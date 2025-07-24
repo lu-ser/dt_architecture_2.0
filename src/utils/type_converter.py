@@ -44,6 +44,9 @@ class TypeConverter:
     @staticmethod
     def strings_to_enum_set(values: List[str], enum_class: Type[T], field_name: str = "values") -> Set[T]:
         """Convert a list of strings to a set of enums."""
+        if values is None:
+            return set()
+        
         if not isinstance(values, list):
             raise ValidationError(f"{field_name} must be a list, got {type(values)}")
         
@@ -135,6 +138,10 @@ class TypeConverter:
         if 'capabilities' in converted:
             capabilities = converted['capabilities']
             twin_type = config.get('twin_type', 'asset')  # Default to asset
+            
+            # ✅ AGGIUNGI CHECK PER None
+            if capabilities is None:
+                capabilities = ["monitoring"]  # Default capability
             
             # Validate each capability
             invalid_capabilities = []
