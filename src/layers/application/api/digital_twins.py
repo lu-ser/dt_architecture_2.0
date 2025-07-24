@@ -23,6 +23,9 @@ from src.core.interfaces.digital_twin import TwinCapability, DigitalTwinType
 from src.utils.exceptions import EntityNotFoundError
 from datetime import timezone, timedelta, datetime
 
+from src.core.capabilities.capability_registry import get_capability_registry
+from src.utils.type_converter import validate_capability, get_available_capabilities
+
 logger = logging.getLogger(__name__)
 
 # Create router
@@ -53,16 +56,57 @@ class DigitalTwinCreate(BaseModel):
             valid_types = [t.value for t in DigitalTwinType]
             raise ValueError(f"Invalid twin_type. Must be one of: {valid_types}")
     
-    @validator('capabilities')
+    @validator('capabilities', pre=True)
     @classmethod
-    def validate_capabilities(cls, v):
-        try:
-            for cap in v:
-                TwinCapability(cap)
-            return v
-        except ValueError as e:
-            valid_caps = [c.value for c in TwinCapability]
-            raise ValueError(f"Invalid capability. Must be one of: {valid_caps}")
+    def validate_capabilities(cls, v, values):
+        """
+        UPDATED: Now uses registry-based validation instead of hardcoded enum.
+        """
+        if not isinstance(v, list):
+            raise ValueError("capabilities must be a list")
+        
+        if not v:  # Empty list
+            raise ValueError("capabilities list cannot be empty")
+        
+        # Get twin_type for context-aware validation
+        twin_type = values.get('twin_type', 'asset')  # Default to asset
+        
+        # Get registry instance
+        registry = get_capability_registry()
+        
+        # Validate each capability
+        invalid_capabilities = []
+        valid_capabilities = []
+        
+        for cap in v:
+            if not isinstance(cap, str):
+                raise ValueError(f"All capabilities must be strings, got {type(cap)}")
+            
+            # Check if capability exists in registry
+            if registry.has_capability(cap):
+                # Check twin type compatibility
+                cap_def = registry.get_capability(cap)
+                if cap_def.required_twin_types and twin_type not in cap_def.required_twin_types:
+                    invalid_capabilities.append(f"{cap} (not compatible with {twin_type})")
+                else:
+                    valid_capabilities.append(cap)
+            else:
+                invalid_capabilities.append(cap)
+        
+        if invalid_capabilities:
+            # Get available capabilities for helpful error message
+            available = get_available_capabilities(twin_type)
+            core_caps = [cap for cap in available if not '.' in cap]
+            domain_caps = [cap for cap in available if '.' in cap]
+            
+            error_msg = f"Invalid capabilities: {invalid_capabilities}.\n"
+            error_msg += f"Available core capabilities: {core_caps}\n"
+            if domain_caps:
+                error_msg += f"Available domain capabilities: {domain_caps}"
+            
+            raise ValueError(error_msg)
+        
+        return valid_capabilities
 
 
 class CapabilityExecution(BaseModel):
@@ -74,13 +118,28 @@ class CapabilityExecution(BaseModel):
     @validator('capability')
     @classmethod
     def validate_capability(cls, v):
-        try:
-            TwinCapability(v)
-            return v
-        except ValueError:
-            valid_caps = [c.value for c in TwinCapability]
-            raise ValueError(f"Invalid capability. Must be one of: {valid_caps}")
+        """
+        UPDATED: Now uses registry-based validation.
+        """
+        if not isinstance(v, str):
+            raise ValueError("capability must be a string")
+        
+        registry = get_capability_registry()
+        if not registry.has_capability(v):
+            available = [cap.full_name for cap in registry.list_capabilities()]
+            raise ValueError(f"Invalid capability '{v}'. Available capabilities: {available}")
+        
+        return v
 
+class CapabilityInfo(BaseModel):
+    """Model for capability information."""
+    name: str
+    namespace: str
+    full_name: str
+    description: str
+    category: str
+    required_permissions: List[str]
+    required_twin_types: List[str]
 
 class ReplicaAssociation(BaseModel):
     """Model for associating a replica with a Digital Twin."""
@@ -130,31 +189,17 @@ async def list_digital_twins(
 ) -> Dict[str, Any]:
     """List Digital Twins with optional filtering."""
     try:
-        # Build discovery criteria
-        criteria = {}
+        filters = {}
         if twin_type:
-            criteria["type"] = twin_type
+            filters['twin_type'] = twin_type
         if capabilities:
-            criteria["has_capability"] = capabilities[0]  # For simplicity, use first capability
+            filters['capabilities'] = capabilities
         
-        # Discover twins
-        from src.layers.application.api_gateway import RequestType
-        twins = await gateway.discover_entities(RequestType.DIGITAL_TWIN, criteria)
-        
-        # Apply pagination
-        total = len(twins)
-        paginated_twins = twins[offset:offset + limit]
-        
-        return {
-            "twins": paginated_twins,
-            "pagination": {
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-                "count": len(paginated_twins)
-            }
-        }
-        
+        return await gateway.list_digital_twins(
+            filters=filters,
+            limit=limit,
+            offset=offset
+        )
     except Exception as e:
         logger.error(f"Failed to list Digital Twins: {e}")
         raise HTTPException(
@@ -163,22 +208,27 @@ async def list_digital_twins(
         )
 
 
-@router.post("/", summary="Create Digital Twin", response_model=DigitalTwinResponse)
+@router.post("/", summary="Create Digital Twin")
 async def create_digital_twin(
-    twin_data: DigitalTwinCreate,
+    twin_data: DigitalTwinCreate = Body(...),
     gateway: APIGateway = Depends(get_gateway)
 ) -> Dict[str, Any]:
-    """Create a new Digital Twin."""
+    """
+    Create a new Digital Twin.
+    UPDATED: Now supports plugin-based capabilities.
+    """
     try:
-        # Convert Pydantic model to dict
+        # Convert to internal format (this now uses registry validation)
         twin_config = twin_data.dict()
         
-        # Create Digital Twin via gateway
+        # Create the twin
         result = await gateway.create_digital_twin(twin_config)
         
+        logger.info(f"Created Digital Twin {result.get('id')} with capabilities: {twin_data.capabilities}")
         return result
         
     except ValueError as e:
+        # This catches capability validation errors
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e)
@@ -191,12 +241,87 @@ async def create_digital_twin(
         )
 
 
-@router.get("/{twin_id}", summary="Get Digital Twin", response_model=DigitalTwinResponse)
+@router.get("/capabilities", summary="List Available Capabilities")
+async def list_capabilities(
+    namespace: Optional[str] = Query(None, description="Filter by namespace"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    twin_type: Optional[str] = Query(None, description="Filter by twin type compatibility")
+) -> Dict[str, Any]:
+    """List all available capabilities with optional filtering."""
+    try:
+        registry = get_capability_registry()
+        capabilities = registry.list_capabilities(
+            namespace=namespace,
+            category=category,
+            twin_type=twin_type
+        )
+        
+        capability_info = [
+            CapabilityInfo(
+                name=cap.name,
+                namespace=cap.namespace,
+                full_name=cap.full_name,
+                description=cap.description,
+                category=cap.category,
+                required_permissions=cap.required_permissions,
+                required_twin_types=cap.required_twin_types
+            ).dict() for cap in capabilities
+        ]
+        
+        return {
+            "capabilities": capability_info,
+            "total_count": len(capability_info),
+            "namespaces": registry.get_namespaces(),
+            "filters_applied": {
+                "namespace": namespace,
+                "category": category,
+                "twin_type": twin_type
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to list capabilities: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve capabilities: {e}"
+        )
+
+
+@router.get("/capabilities/{capability_name}", summary="Get Capability Details")
+async def get_capability_details(
+    capability_name: str = Path(..., description="Full capability name (e.g., 'energy.blade_control')")
+) -> Dict[str, Any]:
+    """Get detailed information about a specific capability."""
+    try:
+        registry = get_capability_registry()
+        capability = registry.get_capability(capability_name)
+        
+        if not capability:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Capability '{capability_name}' not found"
+            )
+        
+        return {
+            "capability": capability.to_dict(),
+            "handler_available": registry.get_handler(capability_name) is not None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get capability details for {capability_name}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve capability details: {e}"
+        )
+
+@router.get("/{twin_id}", summary="Get Digital Twin")
 async def get_digital_twin(
     twin_id: UUID = Path(..., description="Digital Twin ID"),
     gateway: APIGateway = Depends(get_gateway)
 ) -> Dict[str, Any]:
-    """Get a specific Digital Twin by ID."""
+    """Get Digital Twin information."""
     try:
         return await gateway.get_digital_twin(twin_id)
     except EntityNotFoundError:
@@ -248,7 +373,10 @@ async def execute_capability(
     execution_data: CapabilityExecution = Body(...),
     gateway: APIGateway = Depends(get_gateway)
 ) -> Dict[str, Any]:
-    """Execute a capability on a Digital Twin."""
+    """
+    Execute a capability on a Digital Twin.
+    UPDATED: Now works with plugin-based capability system.
+    """
     try:
         result = await gateway.execute_twin_capability(
             twin_id=twin_id,
@@ -275,7 +403,6 @@ async def execute_capability(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Capability execution failed: {e}"
         )
-
 
 @router.post("/{twin_id}/predict", summary="Execute Prediction Capability")
 async def predict(
