@@ -163,7 +163,7 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
     """
 
     def __init__(self, storage_adapter: IStorageAdapter[IDigitalTwin], 
-             cache_enabled: bool = True, cache_size: int = 1000, cache_ttl: int = 300):
+         cache_enabled: bool = True, cache_size: int = 1000, cache_ttl: int = 300):
         # Inizializza il registry base
         super().__init__(
             entity_type=IDigitalTwin, 
@@ -180,6 +180,10 @@ class EnhancedDigitalTwinRegistry(AbstractRegistry[IDigitalTwin]):
         self.model_registry: Dict[UUID, TwinSnapshot] = {}
         self.twin_snapshots: Dict[UUID, List[TwinSnapshot]] = {}
         self._associations: Dict[str, DigitalTwinAssociation] = {}   
+        
+        # ✅ FIX: Aggiungi questa riga
+        self._association_manager = None
+        
         # Lock per operazioni concorrenti
         self._association_lock = asyncio.Lock()
         self._performance_lock = asyncio.Lock()

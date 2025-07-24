@@ -43,6 +43,12 @@ class ReplicaOperationStatus(Enum):
     CANCELLED = "cancelled"
 
 
+def safe_enum_value(obj, default="unknown"):
+    """Safely get enum value, handling both enum objects and strings."""
+    if hasattr(obj, 'value'):
+        return obj.value
+    return str(obj) if obj is not None else default
+
 class ReplicaOperation:
     """Represents an operation performed on a Digital Replica."""
     
@@ -100,7 +106,7 @@ class ReplicaOperation:
             "operation_id": str(self.operation_id),
             "operation_type": self.operation_type,
             "replica_id": str(self.replica_id),
-            "status": self.status.value,
+            "status": safe_enum_value(self.status),
             "parameters": self.parameters,
             "requester_id": str(self.requester_id) if self.requester_id else None,
             "created_at": self.created_at.isoformat(),
@@ -143,7 +149,7 @@ class ReplicaHealthCheck:
         """Convert health check to dictionary representation."""
         return {
             "replica_id": str(self.replica_id),
-            "status": self.status.value,
+            "status": safe_enum_value(self.status),
             "last_check": self.last_check.isoformat(),
             "checks": self.checks,
             "metrics": self.metrics,
@@ -399,9 +405,9 @@ class DigitalReplicaLifecycleManager(IReplicaLifecycleManager):
             # Get basic monitoring info
             monitoring_data = {
                 "replica_id": str(entity_id),
-                "status": replica.status.value,
-                "type": replica.replica_type.value,
-                "aggregation_mode": replica.aggregation_mode.value,
+                "status": safe_enum_value(replica.status),
+                "type": safe_enum_value(replica.replica_type),
+                "aggregation_mode": safe_enum_value(replica.aggregation_mode),
                 "device_count": len(replica.device_ids),
                 "parent_digital_twin_id": str(replica.parent_digital_twin_id)
             }
@@ -507,10 +513,10 @@ class DigitalReplicaLifecycleManager(IReplicaLifecycleManager):
                 for i in range(scale_factor - 1):
                     # Create new configuration
                     config = {
-                        "replica_type": original_replica.replica_type.value,
+                        "replica_type": safe_enum_value(original_replica.replica_type),
                         "parent_digital_twin_id": str(original_replica.parent_digital_twin_id),
                         "device_ids": original_replica.device_ids.copy(),
-                        "aggregation_mode": original_replica.aggregation_mode.value,
+                        "aggregation_mode": safe_enum_value(original_replica.aggregation_mode),
                         "aggregation_config": original_replica.configuration.aggregation_config,
                         "data_retention_policy": original_replica.configuration.data_retention_policy,
                         "quality_thresholds": original_replica.configuration.quality_thresholds
@@ -640,8 +646,7 @@ class DigitalReplicaLifecycleManager(IReplicaLifecycleManager):
             # Check replica status
             checks["status_check"] = replica.status in [EntityStatus.ACTIVE, EntityStatus.INACTIVE]
             if not checks["status_check"]:
-                issues.append(f"Replica status is {replica.status.value}")
-            
+                issues.append(f"Replica status is {safe_enum_value(replica.status)}")
             # Check data flow
             performance = await self.registry.get_replica_performance(replica_id)
             data_received = performance.get("total_data_received", 0)
@@ -762,7 +767,7 @@ class DigitalReplicaLifecycleManager(IReplicaLifecycleManager):
         # Health statistics
         health_stats = {}
         for status in ReplicaHealthStatus:
-            health_stats[status.value] = len([
+            health_stats[safe_enum_value(status.status)] = len([
                 hc for hc in self.health_checks.values()
                 if hc.status == status
             ])

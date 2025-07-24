@@ -256,16 +256,25 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
             association_manager = await self._get_association_manager()
             persistent_associations = await association_manager.get_all_associations()
             
+            # 🔍 DEBUG: Log delle associazioni prima del caricamento
+            logger.info(f"🔍 DEBUG: AssociationManager returned {len(persistent_associations)} twin mappings")
+            for twin_id, replica_set in persistent_associations.items():
+                logger.info(f"🔍 DEBUG: Twin {twin_id} (type: {type(twin_id)}) -> {len(replica_set)} replicas")
+            
             # Clear and update the existing Dict
             self.digital_twin_replicas.clear()
             self.digital_twin_replicas.update(persistent_associations)
+            
+            # 🔍 DEBUG: Verifica che il caricamento sia avvenuto correttamente
+            logger.info(f"🔍 DEBUG: After update, digital_twin_replicas has {len(self.digital_twin_replicas)} mappings")
+            for twin_id, replica_set in self.digital_twin_replicas.items():
+                logger.info(f"🔍 DEBUG: Loaded Twin {twin_id} (type: {type(twin_id)}) -> {len(replica_set)} replicas")
             
             total_associations = sum(len(replicas) for replicas in persistent_associations.values())
             logger.info(f"✅ Loaded {total_associations} associations into memory Dict")
             
         except Exception as e:
             logger.error(f"❌ Failed to load associations from storage: {e}")
-            # Continue with empty dict
     
     async def register_digital_replica(
     self,
@@ -342,38 +351,22 @@ class DigitalReplicaRegistry(AbstractRegistry[IDigitalReplica]):
     
     
     async def find_replicas_by_digital_twin(self, digital_twin_id: UUID) -> List[IDigitalReplica]:
-        """
-        Find replicas using memory Dict (for compatibility) but ensure it's synced
-        """
+        """Find replicas using PERSISTENT storage directly (bypassing memory dict)"""
         try:
-            # Use the normal Dict lookup (compatible with existing code)
-            replica_ids = self.digital_twin_replicas.get(digital_twin_id, set())
-            
-            # If empty, try to reload from storage once
-            if not replica_ids:
-                await self.load_associations_from_storage()
-                replica_ids = self.digital_twin_replicas.get(digital_twin_id, set())
+            # Use AssociationManager directly instead of memory dict
+            association_manager = await self._get_association_manager()
+            replica_ids = await association_manager.get_replicas_for_twin(digital_twin_id)
             
             # Get the actual replica objects
             replicas = []
-            stale_replica_ids = []
-            
             for replica_id in replica_ids:
                 try:
                     replica = await self.get_digital_replica(replica_id)
                     replicas.append(replica)
                 except Exception as e:
                     logger.warning(f"Replica {replica_id} found in associations but not in storage: {e}")
-                    stale_replica_ids.append(replica_id)
             
-            # Clean up stale associations from memory Dict
-            if stale_replica_ids:
-                for stale_id in stale_replica_ids:
-                    self.digital_twin_replicas[digital_twin_id].discard(stale_id)
-                    if not self.digital_twin_replicas[digital_twin_id]:
-                        del self.digital_twin_replicas[digital_twin_id]
-            
-            logger.info(f"✅ Found {len(replicas)} replicas for twin {digital_twin_id} (using Dict)")
+            logger.info(f"✅ Found {len(replicas)} replicas for twin {digital_twin_id} (using PERSISTENT storage)")
             return replicas
             
         except Exception as e:

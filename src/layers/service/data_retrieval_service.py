@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from src.core.interfaces.service import IService, ServiceType, ServicePriority
 from src.core.interfaces.base import BaseMetadata, EntityStatus
 from src.utils.exceptions import ServiceError, EntityNotFoundError
+from src.core.interfaces.replica import DataQuality
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +397,7 @@ class DataRetrievalService(IService):
                 if quality_score >= query.min_quality:
                     data_point = {
                         "device_id": entity.device_id,
-                        "timestamp": entity.timestamp.isoformat(),
+                        "timestamp": entity.timestamp if isinstance(entity.timestamp, str) else entity.timestamp.isoformat(),
                         "data": entity.data,
                         "data_type": entity.data_type,
                         "quality": quality_score,
@@ -482,7 +483,7 @@ class DataRetrievalService(IService):
     
     async def _get_historical_data(self, query: DataRetrievalQuery) -> List[Dict[str, Any]]:
         """
-        Get historical data from MongoDB - VERA IMPLEMENTAZIONE!
+        Get historical data from MongoDB
         """
         if not self.virtualization_orchestrator:
             raise ServiceError("Virtualization orchestrator not available")
@@ -527,7 +528,7 @@ class DataRetrievalService(IService):
                 if quality_score >= query.min_quality:
                     data_point = {
                         "device_id": entity.device_id,
-                        "timestamp": entity.timestamp.isoformat(),
+                        "timestamp": entity.timestamp if isinstance(entity.timestamp, str) else entity.timestamp.isoformat(),
                         "data": entity.data,
                         "data_type": entity.data_type,
                         "quality": quality_score,

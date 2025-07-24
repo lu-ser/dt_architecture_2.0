@@ -280,6 +280,7 @@ class PersistentAssociationManager:
             logger.error(f"❌ Failed to remove association {twin_id} -> {replica_id}: {e}")
             return False
     
+    
     async def get_replicas_for_twin(self, twin_id: UUID) -> Set[UUID]:
         """Ottieni tutte le repliche associate a un Digital Twin"""
         
@@ -287,7 +288,19 @@ class PersistentAssociationManager:
             await self.initialize()
         
         async with self._cache_lock:
-            return self._memory_cache.get(twin_id, set()).copy()
+            # FIX: Convert UUID to string for lookup since keys are strings
+            twin_key = str(twin_id)
+            replica_strings = self._memory_cache.get(twin_key, set())
+            
+            # Convert string replica IDs back to UUIDs
+            replica_uuids = set()
+            for replica_str in replica_strings:
+                try:
+                    replica_uuids.add(UUID(replica_str) if isinstance(replica_str, str) else replica_str)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid replica ID format: {replica_str}")
+            
+            return replica_uuids
     
     async def get_twin_for_replica(self, replica_id: UUID) -> Optional[UUID]:
         """Ottieni il Digital Twin associato a una replica"""
@@ -315,9 +328,26 @@ class PersistentAssociationManager:
             await self.initialize()
         
         async with self._cache_lock:
-            return {twin_id: replicas.copy() 
-                    for twin_id, replicas in self._memory_cache.items()}
-    
+            # Convert string keys back to UUIDs
+            result = {}
+            for twin_str, replica_strings in self._memory_cache.items():
+                try:
+                    twin_uuid = UUID(twin_str) if isinstance(twin_str, str) else twin_str
+                    replica_uuids = set()
+                    
+                    for replica_str in replica_strings:
+                        try:
+                            replica_uuids.add(UUID(replica_str) if isinstance(replica_str, str) else replica_str)
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid replica ID format: {replica_str}")
+                    
+                    result[twin_uuid] = replica_uuids
+                    
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid twin ID format: {twin_str}")
+            
+            return result
+
     async def sync_with_registries(self, dt_registry, dr_registry) -> None:
         """Sincronizza le associazioni con i registries esistenti"""
         
