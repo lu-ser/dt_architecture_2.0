@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 from enum import Enum
-
+from src.core.services.device_configuration_service import get_device_configuration_service
+from src.core.protocols.protocol_registry import get_protocol_registry
 # Import layer orchestrators
 from src.layers.digital_twin import get_digital_twin_orchestrator
 from src.layers.service import get_service_orchestrator
@@ -72,6 +73,9 @@ class APIGateway:
         self.enforce_tenant_isolation = self.config.get('security.enforce_tenant_isolation', True)
         self.require_ownership_for_write = self.config.get('security.require_ownership_for_write', True)
 
+        self.device_configuration_service = None
+        self.protocol_registry = None
+
     async def initialize(self) -> None:
         """Initialize the API Gateway and connect to layer orchestrators."""
         if self._initialized:
@@ -103,7 +107,14 @@ class APIGateway:
             except Exception as e:
                 logger.warning(f"Failed to register data service factory: {e}")
                 # Non-critical error, continue initialization
-            
+            try:
+                logger.info("Initializing device protocol system...")
+                self.protocol_registry = await get_protocol_registry()
+                self.device_configuration_service = await get_device_configuration_service()
+                logger.info("Device protocol system initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize device protocols: {e}")
+
             self._initialized = True
             logger.info("API Gateway initialization completed")
             
@@ -111,7 +122,18 @@ class APIGateway:
             logger.error(f"Failed to initialize API Gateway: {e}")
             raise APIGatewayError(f"API Gateway initialization failed: {e}")
     
-    
+    async def get_device_configuration_service(self):
+        """Get device configuration service instance."""
+        if not self.device_configuration_service:
+            self.device_configuration_service = await get_device_configuration_service()
+        return self.device_configuration_service
+
+    async def get_protocol_registry(self):
+        """Get protocol registry instance."""
+        if not self.protocol_registry:
+            self.protocol_registry = await get_protocol_registry()
+        return self.protocol_registry
+
     async def associate_replica_with_twin(
         self, 
         twin_id: UUID, 

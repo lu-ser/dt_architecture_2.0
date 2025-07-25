@@ -91,9 +91,28 @@ class SimpleConfig:
             # JWT config (for backwards compatibility)
             'jwt': {
                 'secret_key': os.getenv('DT_AUTH_SECRET', 'dev-secret-key-change-in-production')
+            },
+            'protocols': {
+                'http_defaults': {
+                    'timeout': int(os.getenv('DT_PROTOCOL_HTTP_TIMEOUT', '30')),
+                    'polling_interval': int(os.getenv('DT_PROTOCOL_HTTP_POLL', '60')),
+                    'max_concurrent_requests': int(os.getenv('DT_PROTOCOL_HTTP_CONCURRENT', '10'))
+                },
+                'mqtt_defaults': {
+                    'keepalive': int(os.getenv('DT_PROTOCOL_MQTT_KEEPALIVE', '60')),
+                    'qos': int(os.getenv('DT_PROTOCOL_MQTT_QOS', '1')),
+                    'retain': os.getenv('DT_PROTOCOL_MQTT_RETAIN', 'false').lower() == 'true',
+                    'reconnect_attempts': int(os.getenv('DT_PROTOCOL_MQTT_RECONNECT', '5'))
+                },
+                'max_adapters': int(os.getenv('DT_PROTOCOL_MAX_ADAPTERS', '10')),
+                'max_devices_per_adapter': int(os.getenv('DT_PROTOCOL_MAX_DEVICES', '100')),
+                'message_queue_size': int(os.getenv('DT_PROTOCOL_QUEUE_SIZE', '1000'))
+            },
+            'device_storage': {
+                'persistent': os.getenv('DT_DEVICE_STORAGE_PERSIST', 'true').lower() == 'true',
+                'backend': os.getenv('DT_DEVICE_STORAGE_BACKEND', 'mongodb')  # mongodb, redis, memory
             }
         }
-    
     def get(self, key, default=None):
         """Get configuration value using dot notation."""
         keys = key.split('.')
@@ -129,6 +148,9 @@ class DigitalTwinPlatform:
         # NEW: Storage status
         self._storage_initialized = False
         self._storage_status = {}
+
+        self.device_service = None
+        self.protocol_registry = None
         
     async def initialize(self) -> None:
         """Initialize the platform and all its components."""
@@ -234,7 +256,15 @@ class DigitalTwinPlatform:
             return
             
         logger.info("Stopping Digital Twin Platform...")
-        
+        if self.protocol_registry:
+            try:
+                logger.info("Stopping device protocol system...")
+                # Disconnect all adapters
+                for adapter_id in list(self.protocol_registry.adapters.keys()):
+                    await self.protocol_registry.remove_adapter(adapter_id)
+                logger.info("Device protocol system stopped")
+            except Exception as e:
+                logger.error(f"Error stopping device protocols: {e}")
         try:
             # Stop layers in reverse order
             if self.digital_twin_orchestrator:
@@ -370,7 +400,15 @@ class DigitalTwinPlatform:
             self.application_layer = await initialize_application_layer()
             
             logger.info("All platform layers initialized")
+            logger.info("Initializing Device Protocol System...")
+            from src.core.services.device_configuration_service import get_device_configuration_service
+            from src.core.protocols.protocol_registry import get_protocol_registry
             
+            self.protocol_registry = await get_protocol_registry()
+            self.device_service = await get_device_configuration_service()
+            logger.info("Device Protocol System initialized")
+            
+            logger.info("All platform layers initialized")
         except Exception as e:
             logger.error(f"Failed to initialize layers: {e}")
             raise
@@ -597,7 +635,10 @@ async def main():
             primary = platform._storage_status.get('primary_storage', 'unknown')
             cache = platform._storage_status.get('cache_storage', 'none')
             logger.info(f"Storage: {primary} + {cache}")
-        
+        if platform.protocol_registry:
+            status = platform.protocol_registry.get_registry_status()
+            logger.info(f"Device Protocols: {len(status.get('available_protocols', []))} protocols available")
+            logger.info(f"Device Management: http://{host}:{port}/api/v1/devices")
         # Start API server (this will block until shutdown)
         await platform.start_api_server(host=host, port=port)
         
@@ -642,6 +683,12 @@ if __name__ == "__main__":
     print(f"   DT_LOG_LEVEL: {os.getenv('DT_LOG_LEVEL', 'INFO')}")
     print(f"   DT_STORAGE_PRIMARY: {os.getenv('DT_STORAGE_PRIMARY', 'mongodb')}")
     print(f"   DT_STORAGE_CACHE: {os.getenv('DT_STORAGE_CACHE', 'redis')}")
+    print("=" * 50)
+    print("Device Protocol Settings:")
+    print(f"   DT_PROTOCOL_HTTP_TIMEOUT: {os.getenv('DT_PROTOCOL_HTTP_TIMEOUT', '30')}")
+    print(f"   DT_PROTOCOL_HTTP_POLL: {os.getenv('DT_PROTOCOL_HTTP_POLL', '60')}")
+    print(f"   DT_PROTOCOL_MQTT_KEEPALIVE: {os.getenv('DT_PROTOCOL_MQTT_KEEPALIVE', '60')}")
+    print(f"   DT_PROTOCOL_MAX_ADAPTERS: {os.getenv('DT_PROTOCOL_MAX_ADAPTERS', '10')}")
     print("=" * 50)
     
     # Run the platform

@@ -176,6 +176,13 @@ def register_routers(app: FastAPI) -> None:
             'tags': ['🔒 Secure Digital Twins'], 
             'module_path': 'src.layers.application.api.secure_digital_twins'
         },
+        # NEW: Device Configuration Routes
+        {
+            'name': 'device_config', 
+            'prefix': '/api/v1/devices', 
+            'tags': ['🔌 Device Configuration'], 
+            'module_path': 'src.layers.application.api.device_config'
+        },
         
         # === OTHER SERVICES ===
         {
