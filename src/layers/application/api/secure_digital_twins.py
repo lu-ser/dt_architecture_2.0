@@ -27,7 +27,7 @@ class SecureDigitalTwinCreate(BaseModel):
     twin_type: str = Field(..., description='Type of Digital Twin')
     name: str = Field(..., min_length=1, max_length=255, description='Human-readable name')
     description: str = Field('', max_length=1000, description='Description of the twin')
-    capabilities: List[str] = Field(..., min_items=1, description='List of capabilities')
+    capabilities: Optional[List[str]] = Field(None, description='List of capabilities (optional, defaults to ["monitoring"])')
     template_id: Optional[str] = Field(None, description='Template ID for creation')
     customization: Optional[Dict[str, Any]] = Field(None, description='Template customization')
     
@@ -38,6 +38,7 @@ class SecureDigitalTwinCreate(BaseModel):
         None, 
         description='Initial authorized users [{"user_id": "uuid", "access_level": "read|write|execute|admin"}]'
     )
+    metadata: Optional[Dict[str, Any]] = Field(None, description='Custom metadata')
     
     @validator('twin_type')
     @classmethod
@@ -53,35 +54,39 @@ class SecureDigitalTwinCreate(BaseModel):
     @classmethod
     def validate_capabilities(cls, v):
         """Validate capabilities or assign defaults if not provided."""
-        # Se capabilities non fornite, assegna default
+        # Se None o lista vuota, il factory userà ["monitoring"] di default
         if v is None or v == []:
-            return ["monitoring"]  # Default capability
+            return None
+            
+        if not isinstance(v, list):
+            raise ValueError("capabilities must be a list")
         
-        # Se fornite, prova validazione con registry (se disponibile)
+        # Validazione con registry (copiata dall'endpoint legacy)
         try:
             from src.core.capabilities.capability_registry import get_capability_registry
             registry = get_capability_registry()
             
             invalid_capabilities = []
+            valid_capabilities = []
+            
             for cap in v:
-                if not registry.has_capability(cap):
+                if not isinstance(cap, str):
+                    raise ValueError(f"All capabilities must be strings, got {type(cap)}")
+                
+                if registry.has_capability(cap):
+                    valid_capabilities.append(cap)
+                else:
                     invalid_capabilities.append(cap)
             
             if invalid_capabilities:
                 available = [cap.full_name for cap in registry.list_capabilities()]
                 raise ValueError(f"Invalid capabilities: {invalid_capabilities}. Available: {available}")
             
-            return v
+            return valid_capabilities
             
         except ImportError:
-            # Registry non disponibile, usa validazione legacy
-            try:
-                for cap in v:
-                    TwinCapability(cap)
-                return v
-            except ValueError as e:
-                valid_caps = [c.value for c in TwinCapability]
-                raise ValueError(f"Invalid capability. Must be one of: {valid_caps}")
+            # Fallback senza registry
+            return v
     
     @validator('authorized_users')
     @classmethod
@@ -108,15 +113,17 @@ class SecureDigitalTwinCreate(BaseModel):
         schema_extra = {
             'example': {
                 'twin_type': 'asset',
-                'name': 'Secure Industrial Asset',
-                'description': 'A secure digital twin with access controls',
-                'capabilities': ['monitoring', 'analytics', 'prediction'],
+                'name': 'Turbina Eolica #001',
+                'description': 'Digital Twin della turbina principale',
+                'metadata': {
+                    'location': 'Parco Eolico Sardegna',
+                    'manufacturer': 'TecnoWind',
+                    'model': 'TW-3000',
+                    'installation_date': '2024-03-15'
+                },
+                'capabilities': ['monitoring', 'analytics'],  # Opzionale
                 'security_enabled': True,
-                'shared_with_tenant': True,
-                'authorized_users': [
-                    {'user_id': '12345678-1234-1234-1234-123456789012', 'access_level': 'read'},
-                    {'user_id': '87654321-4321-4321-4321-210987654321', 'access_level': 'write'}
-                ]
+                'shared_with_tenant': True
             }
         }
 
